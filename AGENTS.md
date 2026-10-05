@@ -125,3 +125,38 @@ Workspace-scoped queries filter by `workspace_id`; membership gates access and `
 - Do not add internal compatibility shims, dual writes, fallback paths, or legacy adapters unless requested. This does not relax API response compatibility above.
 - New global pre-workspace routes use a single word or `/{noun}/{verb}`, not hyphenated root names. Update `server/internal/handler/reserved_slugs.json`, run `pnpm generate:reserved-slugs`, and commit `packages/core/paths/reserved-slugs.ts` when changing reserved slugs.
 - Use atomic conventional commits and the repository PR template. For releases, follow [.github/RELEASING.md](.github/RELEASING.md); default to a patch bump unless specified otherwise.
+<!-- TRELLIS:START -->
+# Trellis Instructions
+
+These instructions are for AI assistants working in this project.
+
+This project is managed by Trellis. The working knowledge you need lives under `.trellis/`:
+
+- `.trellis/workflow.md` — development phases, when to create tasks, skill routing
+- `.trellis/spec/` — package- and layer-scoped coding guidelines (read before writing code in a given layer)
+- `.trellis/workspace/` — per-developer journals and session traces
+- `.trellis/tasks/` — active and archived tasks (PRDs, research, jsonl context)
+
+If a Trellis command is available on your platform (e.g. `/trellis:finish-work`, `/trellis:continue`), prefer it over manual steps. Not every platform exposes every command.
+
+If you're using Codex or another agent-capable tool, additional project-scoped helpers may live in:
+- `.agents/skills/` — reusable Trellis skills
+- `.codex/agents/` — optional custom subagents
+
+Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
+
+<!-- TRELLIS:END -->
+
+<!-- waggle:stub:begin (managed by `waggle init`; edits inside are overwritten) -->
+## Artifact handoffs (waggle)
+When passing work products between agents or subagents, do not paste file
+contents. Call waggle's `mint` with the artifact's path and hand over the
+`handoff` line from the result. Consumers call `resolve` with the token.
+For SOURCE CODE, mint with `snapshot` (structure is extracted: consumers
+get a symbol outline and `read --symbol NAME`), and declare what a
+consumer must reach — `--require symbol:NAME` — so `coverage` can prove
+the review; judge returned work with `record --stage accepted|rejected`.
+When minting a binary artifact (PDF, image, audio), extract its text with
+your own abilities first and pass it via `content`.
+If unsure what to do with a token, call `map`.
+<!-- waggle:stub:end -->
