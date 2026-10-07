@@ -204,6 +204,21 @@ Independent read-only Sources review VV6iRygR found no concrete blocker after co
 
 This closes the nonvisual feedback loop for the read-only Sources slice, not the complete native swarm. The runbook's user-owned Web/desktop checklist remains unexecuted by the agent. Graph admission, source writes, addressed mail, handoffs, same-session product controls and durable restart replay remain incomplete.
 
+## Published qualified dependency milestone, October 7, 20:58 UTC
+
+Fork main was fast-forwarded with jj to `2adbae9b4c1bd5bd74f7c472a21242fdc341b284`, including parent strict-read feature `90d765cead991a6c2413584cc043c3c67fd04141`. Independent remote ref inspection confirmed the exact SHA. Root acceptance 076337u5fy passed from the immutable 2ad archive in 361 seconds, not the changing implementation tree.
+
+| Requirement | Concrete check and observed result |
+| --- | --- |
+| Complete raw observations without inferred completeness | Full race-enabled Beads tests reject stderr, malformed/duplicate/foreign edges and spoofed show markers, preserve unknown types/external IDs and explicit empty arrays. Actual qualified CLI `TestReadTaskThroughQualifiedCLI` passed three iterations against the approved disposable source. Metadata and edges remain non-atomic, and item revision is not topology CAS. |
+| Canonical receipt identity and retry safety | Production router/PostgreSQL `TestSourceReadDependencyReceiptsThroughRouter` passed three iterations: invalid counts rejected before acceptance, legacy bytes preserved, exact terminal replay and identical create retry accepted, changed topology with unchanged item revision rejected as conflicting replay. |
+| Operational delivery rather than helper-only proof | `TestSourceReadDaemonDispatchThroughProductionRouter` passed list, detail, lost terminal reply and failure variants three times. Opt-in `TestSourceReadQualifiedDaemonThroughProductionRouter` passed three times using actual daemon lifecycle, production router/PostgreSQL and the approved actual Beads executable. Detail launches metadata plus raw edges exactly once each despite a lost committed report reply. Agent providers remain inert test-created executables. |
+| Credential and transaction fences retained | Race-enabled source token router tests passed three iterations, including exact runtime scope, PAT revocation, membership incarnation, expiry after source lock waits and revocation winning before claim. Registration router ownership, rollback and revoke serialization also passed three iterations. |
+| Bounded expiry cannot starve behind missing sources | First immutable attempt 502085auzm failed an existing expiry assertion. Reproduction 7414678mcd failed all ten repeats; actual selection had ten older orphaned receipts. New `TestExpiredWorkSourceSelectionSkipsOrphans` failed before the shared SQL existence filter. After regeneration, 9422125gnw passed the new regression and ten original expiry repeats. Corrected immutable acceptance passed the orphan and sweeper checks three times, without deleting old data. |
+| CLI, build and implementation checks | Default CLI/config suites, daemon source read tests, source service/handler checks passed under race detection. Vet passed across changed backend boundaries. Both server and CLI built and actual CLI help ran. |
+
+The independent read-only strict-read review ZXPxLrsn was consumed with full required coverage and accepted. It is supplementary inspection, not a substitute for the public-router and actual executable results above. This backend slice adds no migration, browser test, frontend graph display, source write or native Start. Earlier Sources frontend packaging acceptance remains a separate published result. Full graph scheduling, mail/handoffs, product session controls, durable restart replay and jj execution remain pending. Browser and visual acceptance remains assigned to the user.
+
 ## Full product acceptance still required
 
 On October 7 at 12:36 UTC the user assigned all browser E2E and visual testing to themselves. Agent verification is limited to code, CLI, unit and integration checks. Provide reproducible environment/setup instructions and a browser acceptance checklist; do not run Playwright or browser-agent testing. User ownership of the visual check does not imply that missing product workflows have been implemented.

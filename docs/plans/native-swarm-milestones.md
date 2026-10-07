@@ -97,6 +97,26 @@ devenv shell -- bash -c 'cd server && MULTICA_RUN_SOURCE_CLIENT_CONTRACT=1 MULTI
 
 This gated test prepares receipts through the actual production router and PostgreSQL, then runs the checked-out TypeScript client/decoder against that server. It does not run a browser, discover installed agents, start services or apply migrations. Default frontend tests skip this integration file unless the Go fixture supplies its explicit environment.
 
+## Milestone 8: qualified dependency observations
+
+Published code `2adbae9b4c1bd5bd74f7c472a21242fdc341b284` adds typed outgoing dependency observations to detail receipts. The qualified Beads adapter reads metadata and then the strict raw dependency operation described in [qualified-dependency-reads.md](qualified-dependency-reads.md). An explicit complete empty observation serializes as `dependencies: []`. Legacy receipts remain readable, but omitted completeness is never promoted to complete. Unknown dependency kinds and external IDs are retained as observations, not interpreted as runnable producers.
+
+These reads are not an atomic metadata/topology or cross-item snapshot. An item revision does not fence dependency edits. The existing Sources page remains an item explorer, not a dependency graph preview or Start control. No source writes or graph execution are enabled.
+
+The exact exported candidate passed default Beads, CLI/config, source service/handler and daemon read checks under the race detector. Production-router/PostgreSQL command, token, registration and daemon dispatch suites passed three iterations, including terminal reply loss without reexecution, canonical typed edges, stale/foreign credentials and expiry after lock waits. Explicit opt-in checks additionally exercised the approved actual Beads executable and actual daemon lifecycle against the production router and PostgreSQL three times. Tests use disposable source fixtures and inert test-created agent executables, never provider-backed agents. Both server and CLI built and CLI help ran. See the qualification document for explicit opt-in setup, not an installed CLI auto-discovery step.
+
+Broader acceptance exposed an existing expiry selection defect: old orphaned receipts occupied every bounded selection slot. The shared SQL selector now excludes receipts whose exact workspace/source no longer exists. A failing orphan regression passed after the fix, as did ten repeated existing expiry checks and the corrected immutable acceptance suite. No existing database data was deleted and no migration was added.
+
+To exercise the default nonvisual paths in a managed testing checkout:
+
+```bash
+devenv shell -- bash -c 'cd server && go test -race ./pkg/beads ./internal/cli ./cmd/multica -count=1'
+devenv shell -- bash -c 'cd server && go test -race ./internal/daemon -run TestWorkSourceRead -count=1'
+devenv shell -- bash -c 'cd server && go test -race ./cmd/server -run "^Test(SourceReadDependencyReceiptsThroughRouter|SourceReadDaemonDispatchThroughProductionRouter|SourceReadToken.*|ExpiredWorkSourceSelectionSkipsOrphans|WorkSourceCommandReceiptsThroughRouter|SweepExpiredWorkSourceCommands|DaemonRegistration.*ThroughRouter)$" -count=3 -v'
+```
+
+Browser/visual testing remains user-owned. No new graph controls are available. Full graph orchestration, addressed mail/handoffs, product session controls, durable restart replay and preferred jj execution remain unfinished.
+
 ## Get the published milestone
 
 Use a separate clean checkout for periodic testing so ongoing implementation files cannot leak into the test build:
