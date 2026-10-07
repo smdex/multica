@@ -107,6 +107,34 @@ func (q *Queries) GetPersonalAccessTokenByHash(ctx context.Context, tokenHash st
 	return i, err
 }
 
+const getPersonalAccessTokenForSourceRead = `-- name: GetPersonalAccessTokenForSourceRead :one
+SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, revoked, created_at FROM personal_access_token
+WHERE token_hash = $1
+  AND revoked = FALSE
+  AND (expires_at IS NULL OR expires_at > clock_timestamp())
+FOR SHARE
+`
+
+// Source credentials bypass the PAT cache. Hold this row through authorization
+// and receipt commit so revocation cannot race a successful operation. Callers
+// recheck expiry after all later lock waits, not just this statement's lookup.
+func (q *Queries) GetPersonalAccessTokenForSourceRead(ctx context.Context, tokenHash string) (PersonalAccessToken, error) {
+	row := q.db.QueryRow(ctx, getPersonalAccessTokenForSourceRead, tokenHash)
+	var i PersonalAccessToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.TokenHash,
+		&i.TokenPrefix,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.Revoked,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listPersonalAccessTokensByUser = `-- name: ListPersonalAccessTokensByUser :many
 SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, revoked, created_at FROM personal_access_token
 WHERE user_id = $1

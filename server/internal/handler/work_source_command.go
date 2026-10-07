@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -70,6 +71,12 @@ func handleWorkSourceCommandError(w http.ResponseWriter, err error) {
 	case errors.Is(err, service.ErrWorkSourceCommandNotFound),
 		errors.Is(err, service.ErrWorkSourceNotFound):
 		writeError(w, http.StatusNotFound, "source command not found")
+	case errors.Is(err, service.ErrSourceReadUnauthorized):
+		writeError(w, http.StatusUnauthorized, "invalid source credential")
+	case errors.Is(err, service.ErrSourceReadForbidden):
+		writeError(w, http.StatusForbidden, "source credential does not own runtime")
+	case errors.Is(err, service.ErrSourceReadOffline):
+		writeError(w, http.StatusConflict, "source runtime is offline")
 	case errors.Is(err, service.ErrWorkSourceCommandConflict):
 		writeError(w, http.StatusConflict, "another source command is in flight")
 	case errors.Is(err, service.ErrWorkSourceCommandDisabled):
@@ -203,7 +210,7 @@ func (h *WorkSourceCommandHandler) ClaimWorkSourceCommand(w http.ResponseWriter,
 	if !ok {
 		return
 	}
-	cmd, err := h.Commands.ClaimWorkSourceCommand(r.Context(), runtime.WorkspaceID, commandUUID, runtime)
+	cmd, err := h.Commands.ClaimWorkSourceCommand(r.Context(), runtime.WorkspaceID, commandUUID, runtime, middleware.SourceReadClaimsFromContext(r.Context()))
 	if err != nil {
 		handleWorkSourceCommandError(w, err)
 		return
@@ -248,7 +255,8 @@ func (h *WorkSourceCommandHandler) ReportWorkSourceCommand(w http.ResponseWriter
 		}
 		cmd, err := h.Commands.ReportWorkSourceCommand(r.Context(), service.ReportWorkSourceCommandParams{
 			WorkspaceID: runtime.WorkspaceID, CommandID: commandUUID, Runtime: runtime,
-			Status: "succeeded", Result: result,
+			Capability: middleware.SourceReadClaimsFromContext(r.Context()),
+			Status:     "succeeded", Result: result,
 		})
 		if err != nil {
 			handleWorkSourceCommandError(w, err)
@@ -262,7 +270,8 @@ func (h *WorkSourceCommandHandler) ReportWorkSourceCommand(w http.ResponseWriter
 		}
 		cmd, err := h.Commands.ReportWorkSourceCommand(r.Context(), service.ReportWorkSourceCommandParams{
 			WorkspaceID: runtime.WorkspaceID, CommandID: commandUUID, Runtime: runtime,
-			Status: "failed", Error: errText,
+			Capability: middleware.SourceReadClaimsFromContext(r.Context()),
+			Status:     "failed", Error: errText,
 		})
 		if err != nil {
 			handleWorkSourceCommandError(w, err)
@@ -320,6 +329,28 @@ func decodeWorkSourceCommandRequest(w http.ResponseWriter, r *http.Request, dst 
 // These endpoints require machine identity, not the legacy workspace-user
 // fallback, which cannot prove possession of the addressed daemon identity.
 func (h *WorkSourceCommandHandler) requireWorkSourceCommandRuntime(w http.ResponseWriter, r *http.Request) (db.AgentRuntime, bool) {
+	if claims := middleware.SourceReadClaimsFromContext(r.Context()); claims != nil {
+		if chi.URLParam(r, "runtimeId") != claims.RuntimeID {
+			writeError(w, http.StatusForbidden, "source credential does not own runtime")
+			return db.AgentRuntime{}, false
+		}
+		runtimeID, ok := parseUUIDOrBadRequest(w, claims.RuntimeID, "runtime id")
+		if !ok {
+			return db.AgentRuntime{}, false
+		}
+		// This lookup only locates the receipt. Authorization is repeated under
+		// runtime, membership and parent locks in the operation transaction.
+		runtime, err := h.Queries.GetAgentRuntime(r.Context(), runtimeID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusServiceUnavailable, "source authorization unavailable")
+			return db.AgentRuntime{}, false
+		}
+		if errors.Is(err, pgx.ErrNoRows) || runtime.WorkspaceID.String() != claims.WorkspaceID {
+			handleWorkSourceCommandError(w, service.ErrWorkSourceCommandNotFound)
+			return db.AgentRuntime{}, false
+		}
+		return runtime, true
+	}
 	runtime, ok := h.requireDaemonRuntimeAccess(w, r, chi.URLParam(r, "runtimeId"))
 	if !ok {
 		return runtime, false

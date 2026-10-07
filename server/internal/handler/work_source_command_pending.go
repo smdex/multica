@@ -3,6 +3,8 @@ package handler
 import (
 	"net/http"
 
+	"github.com/multica-ai/multica/server/internal/middleware"
+
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -14,9 +16,15 @@ func (h *WorkSourceCommandHandler) ListPendingWorkSourceCommands(w http.Response
 	if !ok {
 		return
 	}
-	rows, err := h.Queries.ListPendingWorkSourceCommandsForRuntime(r.Context(), db.ListPendingWorkSourceCommandsForRuntimeParams{
-		RuntimeID: runtime.ID, WorkspaceID: runtime.WorkspaceID, DaemonID: runtime.DaemonID,
-	})
+	var rows []db.ListPendingWorkSourceCommandsForRuntimeRow
+	var err error
+	if claims := middleware.SourceReadClaimsFromContext(r.Context()); claims != nil {
+		rows, err = h.Commands.ListPendingSourceReadCommands(r.Context(), *claims)
+	} else {
+		rows, err = h.Queries.ListPendingWorkSourceCommandsForRuntime(r.Context(), db.ListPendingWorkSourceCommandsForRuntimeParams{
+			RuntimeID: runtime.ID, WorkspaceID: runtime.WorkspaceID, DaemonID: runtime.DaemonID,
+		})
+	}
 	if err != nil {
 		handleWorkSourceCommandError(w, err)
 		return

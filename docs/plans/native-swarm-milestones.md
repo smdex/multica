@@ -48,7 +48,22 @@ devenv shell -- bash -c 'cd server && go test -race ./cmd/server -run "^TestDaem
 devenv shell -- bash -c 'cd server && go test -race ./internal/handler -run "^(TestDaemonRegister.*|TestDaemonRegistrationUpsertOwnerGuards|TestRuntimeProfileDeleteLockSerializesRegistration|TestWorkSourceRuntimeMergeRefusal)$" -count=1 -v'
 ```
 
-These tests use test-created credentials and inert runtime providers, not installed agents. This milestone adds no migration or UI. Source-only credential bootstrap and automatic source-read delivery remain unimplemented.
+These tests use test-created credentials and inert runtime providers, not installed agents. This milestone adds no migration or UI. Credential bootstrap is a separate slice below. Automatic source-read delivery remains unimplemented.
+
+## Milestone 5: scoped source-read credentials
+
+An owned online runtime can exchange a fresh human JWT or PAT at `POST /api/daemon/runtimes/{runtimeId}/source-read-token` with `{"scope":"source:read"}`. The returned `msr_` bearer expires within 120 seconds, clipped to its parent expiry, and is never a user credential or a general daemon token. An admin cannot exchange for another owner's runtime. Cookies, ownerless runtimes and offline runtimes do not qualify.
+
+The capability permits only that runtime's pending-read GET and command claim/result POST routes. Authorization rechecks current ownership, exact daemon identity, the membership row's UUID and any parent PAT in the actual receipt transaction. PAT revocation and membership removal invalidate it. Re-adding membership creates a new incarnation and does not revive the old capability. Ordinary JWT logout is not a server-side revocation mechanism for an already copied JWT.
+
+Run the nonvisual route checks through the checkout's managed database:
+
+```bash
+devenv shell -- bash -c 'cd server && go test -race ./internal/auth ./internal/middleware -run SourceRead -count=1'
+devenv shell -- bash -c 'cd server && go test -race ./cmd/server -run "^TestSourceReadToken" -count=3 -v'
+```
+
+These checks use real HTTP routes and PostgreSQL with test-created credentials. Do not paste returned credentials into logs or screenshots. This slice introduces no migration, token registry, source-write permission or UI. It enables authenticated delivery interfaces, not automatic daemon execution. The local bindings and executor still await polling integration.
 
 ## Get the published milestone
 

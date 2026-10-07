@@ -85,6 +85,9 @@ In `server/internal/handler/`, distinguish UUID sources before using them in wri
 
 Workspace-scoped queries filter by `workspace_id`; membership gates access and `X-Workspace-ID` selects the workspace. Assignees are polymorphic: interpret `assignee_id` together with `assignee_type`.
 
+- Runtime ownership is immutable for an existing UUID. Registration preserves its owner, including NULL provenance. A future ownership-transfer flow must add an incarnation fence before allowing old source credentials to survive a transfer.
+- Source-read credentials are purpose-separated, short-lived capabilities for an exact runtime and the pending/claim/result routes only. They do not establish user or general daemon identity. Exchange verifies a fresh bearer parent, and consumption rechecks runtime ownership, membership row identity and any parent PAT under locks in the operation transaction. Never use a cached PAT lookup as source authorization or skip the expiry check after receipt lock waits.
+
 ## Desktop Rules
 
 - Workspace session routes are tab destinations. Pre-workspace one-shot flows (create workspace, accept invite) use `WindowOverlay` in `apps/desktop/src/renderer/src/stores/window-overlay-store.ts`, not new routes. Stale workspace tabs heal by dropping stale tab groups.

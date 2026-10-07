@@ -111,6 +111,11 @@ func DaemonAuth(queries *db.Queries, patCache *auth.PATCache, daemonCache *auth.
 				return
 			}
 
+			if strings.HasPrefix(tokenString, auth.SourceReadTokenPrefix) {
+				serveSourceReadToken(w, r, tokenString, next)
+				return
+			}
+
 			// Daemon token: "mdt_" prefix.
 			if strings.HasPrefix(tokenString, "mdt_") {
 				hash := auth.HashToken(tokenString)

@@ -393,7 +393,7 @@ func TestWorkSourceCommandWorkspaceRuntimeLockOrder(t *testing.T) {
 			go func() {
 				defer close(workerDone)
 				if operation == "claim" {
-					_, err := worker.ClaimWorkSourceCommand(ctx, parseUUID(workspaceID), parseUUID(commandID), runtime)
+					_, err := worker.ClaimWorkSourceCommand(ctx, parseUUID(workspaceID), parseUUID(commandID), runtime, nil)
 					done <- err
 				} else {
 					_, err := worker.ReportWorkSourceCommand(ctx, service.ReportWorkSourceCommandParams{WorkspaceID: parseUUID(workspaceID), CommandID: parseUUID(commandID), Runtime: runtime, Status: "succeeded", Result: pgtype.Text{String: "[]", Valid: true}})

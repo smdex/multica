@@ -57,6 +57,11 @@ run_checked 'TestValidateWorkSourceCommandReport TestWorkSourceCommandCanonicalR
   go test -race ./internal/service -run '^Test(ValidateWorkSourceCommandReport|WorkSourceCommandCanonicalResult)$' -count=1 -v
 run_checked 'TestWorkSourceCommandReceiptsThroughRouter TestSweepExpiredWorkSourceCommands' \
   go test -race ./cmd/server -run '^Test(WorkSourceCommandReceiptsThroughRouter|SweepExpiredWorkSourceCommands)$' -count=1 -timeout 120s -v
+run_checked 'TestSourceReadTokenRoundTripAndExpiry TestSourceReadTokenPurposeKeySeparation TestSourceReadRouteMatches' \
+  go test -race ./internal/auth ./internal/middleware -run SourceRead -count=1 -v
+run_checked 'TestSourceReadTokenExchangeOwnership TestSourceReadTokenCommandFlow TestSourceReadTokenScopedToFencedRoutes TestSourceReadTokenInvalidationOnPATRevocation TestSourceReadTokenInvalidationOnMembershipIncarnation TestSourceReadTokenExpiresWhileBlockedOnSourceLock TestSourceReadTokenPATRevocationWinsLockBeforeClaim' \
+  go test -race ./cmd/server -run '^TestSourceReadToken' -count=1 -timeout 120s -v
+
 run_checked 'TestRuntimeGC_KeepsWorkSourceOwner TestRuntimeGC_KeepsTerminalTaskHistory' \
   go test -race ./cmd/server -run '^TestRuntimeGC' -count=1 -timeout 120s -v
 

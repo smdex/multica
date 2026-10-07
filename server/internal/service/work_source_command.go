@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/pkg/beads"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
@@ -273,12 +274,28 @@ func (s *WorkSourceCommandService) commandForOwnerRuntime(ctx context.Context, q
 // ClaimWorkSourceCommand transitions pending -> claimed for the owner
 // runtime. Exactly one concurrent claimer wins; others get
 // ErrWorkSourceCommandNotClaimable.
-func (s *WorkSourceCommandService) ClaimWorkSourceCommand(ctx context.Context, workspaceID, commandID pgtype.UUID, runtime db.AgentRuntime) (db.WorkSourceCommand, error) {
+func (s *WorkSourceCommandService) ClaimWorkSourceCommand(ctx context.Context, workspaceID, commandID pgtype.UUID, runtime db.AgentRuntime, capability *auth.SourceReadClaims) (db.WorkSourceCommand, error) {
 	var claimed db.WorkSourceCommand
 	err := s.runInTx(ctx, func(q *db.Queries) error {
+		var parentExpiresAt time.Time
+		if capability != nil {
+			owner, err := authorizeSourceRead(ctx, q, *capability)
+			if err != nil {
+				return err
+			}
+			if owner.runtime.ID != runtime.ID || owner.runtime.WorkspaceID != workspaceID {
+				return ErrSourceReadForbidden
+			}
+			runtime, parentExpiresAt = owner.runtime, owner.parentExpiresAt
+		}
 		cmd, err := s.commandForOwnerRuntime(ctx, q, workspaceID, commandID, runtime)
 		if err != nil {
 			return err
+		}
+		if capability != nil {
+			if err := checkSourceReadTime(*capability, parentExpiresAt); err != nil {
+				return err
+			}
 		}
 		if cmd.Status != "pending" {
 			return ErrWorkSourceCommandNotClaimable
@@ -310,9 +327,25 @@ func (s *WorkSourceCommandService) ClaimWorkSourceCommand(ctx context.Context, w
 func (s *WorkSourceCommandService) ReportWorkSourceCommand(ctx context.Context, p ReportWorkSourceCommandParams) (db.WorkSourceCommand, error) {
 	var reported db.WorkSourceCommand
 	err := s.runInTx(ctx, func(q *db.Queries) error {
+		var parentExpiresAt time.Time
+		if p.Capability != nil {
+			owner, err := authorizeSourceRead(ctx, q, *p.Capability)
+			if err != nil {
+				return err
+			}
+			if owner.runtime.ID != p.Runtime.ID || owner.runtime.WorkspaceID != p.WorkspaceID {
+				return ErrSourceReadForbidden
+			}
+			p.Runtime, parentExpiresAt = owner.runtime, owner.parentExpiresAt
+		}
 		cmd, err := s.commandForOwnerRuntime(ctx, q, p.WorkspaceID, p.CommandID, p.Runtime)
 		if err != nil {
 			return err
+		}
+		if p.Capability != nil {
+			if err := checkSourceReadTime(*p.Capability, parentExpiresAt); err != nil {
+				return err
+			}
 		}
 		if !cmd.ClaimedRuntimeID.Valid || cmd.ClaimedRuntimeID != p.Runtime.ID {
 			return ErrWorkSourceCommandNotClaimer
@@ -377,6 +410,7 @@ func (s *WorkSourceCommandService) ReportWorkSourceCommand(ctx context.Context, 
 // Status must be 'succeeded' or 'failed'; Result/Error are pre-bounded by
 // the handler.
 type ReportWorkSourceCommandParams struct {
+	Capability  *auth.SourceReadClaims
 	WorkspaceID pgtype.UUID
 	CommandID   pgtype.UUID
 	Runtime     db.AgentRuntime

@@ -9,6 +9,16 @@ WHERE token_hash = $1
   AND revoked = FALSE
   AND (expires_at IS NULL OR expires_at > now());
 
+-- name: GetPersonalAccessTokenForSourceRead :one
+-- Source credentials bypass the PAT cache. Hold this row through authorization
+-- and receipt commit so revocation cannot race a successful operation. Callers
+-- recheck expiry after all later lock waits, not just this statement's lookup.
+SELECT * FROM personal_access_token
+WHERE token_hash = $1
+  AND revoked = FALSE
+  AND (expires_at IS NULL OR expires_at > clock_timestamp())
+FOR SHARE;
+
 -- name: ListPersonalAccessTokensByUser :many
 SELECT * FROM personal_access_token
 WHERE user_id = $1
