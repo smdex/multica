@@ -17,6 +17,12 @@ export type {
   CreateIssueWorkLinkParams,
 } from "./work-source";
 export type {
+  WorkSourceCommandName,
+  WorkSourceCommandStatus,
+  WorkSourceCommand,
+  CreateWorkSourceCommandParams,
+} from "./work-source";
+export type {
   Agent,
   AgentConversationStarter,
   AgentStatus,

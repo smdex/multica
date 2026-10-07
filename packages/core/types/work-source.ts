@@ -63,3 +63,45 @@ export interface CreateIssueWorkLinkParams {
   source_id: string;
   native_id: string;
 }
+
+/** Read-only allowlisted commands a source's daemon may execute. */
+export type WorkSourceCommandName = "read" | "list";
+
+export type WorkSourceCommandStatus = "pending" | "claimed" | "succeeded" | "failed";
+
+/**
+ * A read-only source command receipt. `request_id` is a caller-supplied UUID
+ * making create idempotent; status is terminal only on succeeded/failed.
+ */
+export interface WorkSourceCommand {
+  id: string;
+  request_id: string;
+  workspace_id: string;
+  source_id: string;
+  command: WorkSourceCommandName;
+  /** Present for "read" only; opaque, whitespace-significant. */
+  native_id?: string;
+  /** Present for "list" only. */
+  limit_count?: number;
+  status: WorkSourceCommandStatus;
+  config_revision: number;
+  expires_at: string;
+  claimed_runtime_id?: string;
+  claimed_at?: string;
+  /** Present only on get/create; list responses strip it. */
+  result?: string;
+  error?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateWorkSourceCommandParams {
+  /** Caller-supplied UUID; an identical retry returns the existing receipt. */
+  request_id: string;
+  command: WorkSourceCommandName;
+  /** Required for "read". */
+  native_id?: string;
+  /** Only valid for "list". */
+  limit?: number;
+}

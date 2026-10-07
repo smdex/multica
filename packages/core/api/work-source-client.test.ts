@@ -157,3 +157,100 @@ describe("work source client", () => {
     expect(url).toContain("source_id=src-1");
   });
 });
+
+const command = {
+  request_id: "11111111-1111-1111-1111-111111111111",
+  config_revision: 1,
+  expires_at: "2026-10-08T00:00:00Z",
+  id: "cmd-1",
+  workspace_id: "ws-1",
+  source_id: "src-1",
+  command: "read",
+  native_id: "beads-42",
+  status: "pending",
+  created_at: "2026-10-07T00:00:00Z",
+  updated_at: "2026-10-07T00:00:00Z",
+};
+
+describe("work source command client", () => {
+  it("creates a command and preserves request_id on an idempotent retry", async () => {
+    const client = new ApiClient("https://api.example.test");
+    stubFetch(command, 201);
+    const body = { request_id: command.request_id, command: "read" as const, native_id: "beads-42" };
+    const created = await client.createWorkSourceCommand({ workspaceUuid: "ws-1", sourceId: "src-1", body });
+    expect(created.id).toBe("cmd-1");
+    expect(created.status).toBe("pending");
+    // Same request_id retry: server returns the stored receipt with 200.
+    stubFetch({ ...command, status: "claimed" }, 200);
+    const retried = await client.createWorkSourceCommand({ workspaceUuid: "ws-1", sourceId: "src-1", body });
+    expect(retried.request_id).toBe(command.request_id);
+    expect(retried.status).toBe("claimed");
+  });
+
+  it("gets a command and lists a source's commands", async () => {
+    const client = new ApiClient("https://api.example.test");
+    stubFetch({ ...command, result: "{}" });
+    const got = await client.getWorkSourceCommand({ workspaceUuid: "ws-1", commandId: "cmd-1" });
+    expect(got.result).toBe("{}");
+    stubFetch([command]);
+    const list = await client.listWorkSourceCommands({ workspaceUuid: "ws-1", sourceId: "src-1" });
+    expect(list[0]?.command).toBe("read");
+    expect(list[0]?.result).toBeUndefined();
+  });
+
+  it.each([
+    ["command", { ...command, command: "rm-rf" }],
+    ["status", { ...command, status: "executing" }],
+    ["id", { ...command, id: null }],
+    ["request_id", { ...command, request_id: "" }],
+  ])("rejects a malformed command response: bad %s", async (_label, body) => {
+    stubFetch(body);
+    const client = new ApiClient("https://api.example.test");
+    await expect(
+      client.getWorkSourceCommand({ workspaceUuid: "ws-1", commandId: "cmd-1" }),
+    ).rejects.toThrow(/Malformed response/);
+  });
+
+  it("rejects a malformed command list instead of faking an empty one", async () => {
+    stubFetch(null);
+    const client = new ApiClient("https://api.example.test");
+    await expect(
+      client.listWorkSourceCommands({ workspaceUuid: "ws-1", sourceId: "src-1" }),
+    ).rejects.toThrow(/Malformed response/);
+  });
+
+  it("defaults optional fields to undefined without masking identity", async () => {
+    stubFetch({ ...command, native_id: null, limit_count: null, claimed_at: null });
+    const client = new ApiClient("https://api.example.test");
+    const got = await client.getWorkSourceCommand({ workspaceUuid: "ws-1", commandId: "cmd-1" });
+    expect(got.native_id).toBeUndefined();
+    expect(got.limit_count).toBeUndefined();
+    expect(got.status).toBe("pending");
+  });
+
+  it("clears the stale global workspace slug on command calls", async () => {
+    setCurrentWorkspace("other-workspace", "ws-other");
+    const fn = stubFetch([command]);
+    const client = new ApiClient("https://api.example.test");
+    await client.listWorkSourceCommands({ workspaceUuid: "ws-1", sourceId: "src-1" });
+    const headers = new Headers(fn.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("X-Workspace-ID")).toBe("ws-1");
+    expect(headers.get("X-Workspace-Slug")).toBe("");
+  });
+
+  it("surfaces API errors as ApiError", async () => {
+    const client = new ApiClient("https://api.example.test");
+    stubFetch({ error: "another source command is in flight" }, 409);
+    const rejection = client.createWorkSourceCommand({
+      workspaceUuid: "ws-1",
+      sourceId: "src-1",
+      body: { request_id: command.request_id, command: "read", native_id: "beads-42" },
+    });
+    await expect(rejection).rejects.toBeInstanceOf(ApiError);
+    await expect(rejection).rejects.toMatchObject({ status: 409 });
+    stubFetch({ error: "not found" }, 404);
+    await expect(
+      client.getWorkSourceCommand({ workspaceUuid: "ws-1", commandId: "cmd-1" }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+});

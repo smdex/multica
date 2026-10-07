@@ -35,3 +35,29 @@ export function issueWorkLinksBySourceOptions(wsId: string, sourceId: string) {
     enabled: !!wsId && !!sourceId,
   });
 }
+
+export const workSourceCommandKeys = {
+  all: (wsId: string) => ["work-source-commands", wsId] as const,
+  list: (wsId: string, sourceId: string) =>
+    [...workSourceCommandKeys.all(wsId), "list", sourceId] as const,
+  detail: (wsId: string, commandId: string) =>
+    [...workSourceCommandKeys.all(wsId), "detail", commandId] as const,
+};
+
+export function workSourceCommandsOptions(wsId: string, sourceId: string) {
+  return queryOptions({
+    queryKey: workSourceCommandKeys.list(wsId, sourceId),
+    queryFn: ({ signal }) =>
+      api.listWorkSourceCommands({ workspaceUuid: wsId, sourceId, signal }),
+    enabled: !!wsId && !!sourceId,
+  });
+}
+
+export function workSourceCommandOptions(wsId: string, commandId: string) {
+  return queryOptions({
+    queryKey: workSourceCommandKeys.detail(wsId, commandId),
+    queryFn: ({ signal }) =>
+      api.getWorkSourceCommand({ workspaceUuid: wsId, commandId, signal }),
+    enabled: !!wsId && !!commandId,
+  });
+}

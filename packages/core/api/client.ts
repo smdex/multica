@@ -241,6 +241,8 @@ import type {
   CreateWorkSourceParams,
   UpdateWorkSourceParams,
   CreateIssueWorkLinkParams,
+  WorkSourceCommand,
+  CreateWorkSourceCommandParams,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import type {
@@ -497,6 +499,8 @@ import {
   WorkSourceListSchema,
   IssueWorkLinkSchema,
   IssueWorkLinkListSchema,
+  WorkSourceCommandSchema,
+  WorkSourceCommandListSchema,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -5439,5 +5443,45 @@ export class ApiClient {
       method: "DELETE",
       headers: this.workspaceUuidHeaders(params.workspaceUuid),
     });
+  }
+
+  /** Create a read-only source command. 201 for a new receipt, 200 for an
+   *  idempotent retry with the same request_id; both parse identically. */
+  async createWorkSourceCommand(params: {
+    workspaceUuid: string;
+    sourceId: string;
+    body: CreateWorkSourceCommandParams;
+  }): Promise<WorkSourceCommand> {
+    const raw = await this.fetch<unknown>(`/api/work-sources/${params.sourceId}/commands`, {
+      method: "POST",
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      body: JSON.stringify(params.body),
+    });
+    return this.parseWorkSourceResponse<WorkSourceCommand>(raw, WorkSourceCommandSchema, "POST /api/work-sources/:id/commands");
+  }
+
+  async getWorkSourceCommand(params: {
+    workspaceUuid: string;
+    commandId: string;
+    signal?: AbortSignal;
+  }): Promise<WorkSourceCommand> {
+    const raw = await this.fetch<unknown>(`/api/work-source-commands/${params.commandId}`, {
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      signal: params.signal,
+    });
+    return this.parseWorkSourceResponse<WorkSourceCommand>(raw, WorkSourceCommandSchema, "GET /api/work-source-commands/:id");
+  }
+
+  /** Receipts newest first; the server strips `result` from list responses. */
+  async listWorkSourceCommands(params: {
+    workspaceUuid: string;
+    sourceId: string;
+    signal?: AbortSignal;
+  }): Promise<WorkSourceCommand[]> {
+    const raw = await this.fetch<unknown>(`/api/work-sources/${params.sourceId}/commands`, {
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      signal: params.signal,
+    });
+    return this.parseWorkSourceResponse<WorkSourceCommand[]>(raw, WorkSourceCommandListSchema, "GET /api/work-sources/:id/commands");
   }
 }

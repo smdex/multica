@@ -3977,3 +3977,28 @@ export const IssueWorkLinkSchema = z.object({
   created_at: z.string(),
 }).loose();
 export const IssueWorkLinkListSchema = z.array(IssueWorkLinkSchema);
+
+// Work source commands: read-only receipts. Identity fields (ids, command,
+// status, timestamps) must be present; command/status are strict enums — an
+// unknown value rejects the whole response rather than degrading to a value
+// a UI might treat as executable or terminal. Optional fields default off.
+export const WorkSourceCommandSchema = z.object({
+  id: z.string().min(1),
+  request_id: z.string().min(1),
+  workspace_id: z.string().min(1),
+  source_id: z.string().min(1),
+  command: z.enum(["read", "list"]),
+  native_id: z.string().nullish().transform((v) => v ?? undefined),
+  limit_count: z.number().int().nonnegative().nullish().transform((v) => v ?? undefined),
+  status: z.enum(["pending", "claimed", "succeeded", "failed"]),
+  config_revision: z.number().int().nonnegative(),
+  expires_at: z.string(),
+  claimed_runtime_id: z.string().nullish().transform((v) => v ?? undefined),
+  claimed_at: z.string().nullish().transform((v) => v ?? undefined),
+  result: z.string().nullish().transform((v) => v ?? undefined),
+  error: z.string().nullish().transform((v) => v ?? undefined),
+  created_by: z.string().nullish().transform((v) => v ?? undefined),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+export const WorkSourceCommandListSchema = z.array(WorkSourceCommandSchema);
