@@ -88,6 +88,25 @@ Run 2646221tmj passed the complete expanded `scripts/check-native-swarm-foundati
 
 This is a verified receipt API, not automatic Beads execution. The daemon has no approved handle mapping, dispatch loop or standalone `mdt_` bootstrap yet. Production's existing daemon PAT cannot prove machine identity, so new claim/report endpoints refuse it instead of weakening authorization. New unclaimed reads expire after five minutes. Graph admission, mail/handoffs, deployed same-session recovery and application jj lifecycle remain pending. Browser tests were not run and remain user-owned.
 
+## Runtime-scoped pending discovery, October 7, 13:49 UTC
+
+The next slice was developed in the isolated jj workspace `multica-native-swarm`, leaving the original checkout's unrelated research and private files untouched. The existing root checkout's declared devenv PostgreSQL service remained the only database manager. No new services, database creation, environment copies, browser tests or installed agents were used.
+
+`GET /api/daemon/runtimes/{runtimeId}/work-source-commands` returns up to 200 pending read receipts, oldest first, with an opaque `source_handle` but no filesystem path or executable. It reuses exact daemon identity authorization. SQL joins the current runtime, workspace and source, enforcing daemon identity, online status, enabled source, matching configuration revision, pending status and an unexpired deadline. Discovery does not claim or authorize execution. Claim still checks the existing locked fences.
+
+| Requirement | Concrete observation |
+| --- | --- |
+| Real route activation | Pre-fix run 714972z3up reproduced the missing GET route as 404 through production HTTP and PostgreSQL. |
+| Exact daemon authorization | `TestWorkSourceCommandReceiptsThroughRouter` rejects JWT and foreign-daemon discovery as 403; the owning daemon receives its command and exact opaque handle. |
+| Runtime/source isolation | The same test inserts a real pending command for another runtime/daemon in the workspace, which is absent from the owning runtime's response. |
+| Live source and runtime fences | The test disables and changes the source revision, takes the runtime offline and expires the command. Each discovery response is empty. Restoring valid fixture state permits the existing claim/report workflow. |
+| No claimed-command redispatch | The test claims the command through HTTP and confirms pending discovery is empty afterward. |
+| Legacy public behavior | Real Issue, comment and workspace HTTP CRUD checks pass alongside the expanded receipt workflow. |
+
+Run 79378817mh passed the initial corrected pending route under `-race` after `make sqlc`. Run 905965wlf5 passed the expanded cross-runtime/expiry workflow and the three legacy HTTP tests under `-race`, targeted handler/server vet and the actual server binary build. This is a discovery API slice, not automatic daemon delivery: least-privilege credential bootstrap, approved local configuration and polling/report retries remain in progress.
+
+The previously committed shared client was also accepted in root run 494342hv1b: all 23 source/client cases and 184 existing schema cases passed, changed-file ESLint passed and all 10 nonmobile workspace typechecks passed. Its named malformed-response, stable request UUID, stale workspace slug and ApiError cases map to the API boundary requirements. These stubbed transport tests complement, but do not replace, the real server HTTP evidence above.
+
 ## Full product acceptance still required
 
 On October 7 at 12:36 UTC the user assigned all browser E2E and visual testing to themselves. Agent verification is limited to code, CLI, unit and integration checks. Provide reproducible environment/setup instructions and a browser acceptance checklist; do not run Playwright or browser-agent testing. User ownership of the visual check does not imply that missing product workflows have been implemented.

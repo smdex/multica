@@ -94,10 +94,62 @@ func TestWorkSourceCommandReceiptsThroughRouter(t *testing.T) {
 	}
 	commandID := receipt.ID
 	call(http.MethodPost, commandPath, testToken, testWorkspaceID, request, http.StatusOK)
+	foreignRuntime := fixtures.Insert(t, "agent_runtime", testutil.Cols{
+		"workspace_id": testWorkspaceID, "owner_id": testUserID,
+		"name": "Other source runtime", "daemon_id": "other-" + daemonID,
+		"provider": "other-source-router-test", "runtime_mode": "cloud",
+		"status": "online", "device_info": "", "metadata": testutil.Raw("'{}'::jsonb"),
+	})
+	foreignSource := fixtures.Insert(t, "work_source", testutil.Cols{
+		"id": testutil.Raw("gen_random_uuid()"), "workspace_id": testWorkspaceID,
+		"runtime_id": foreignRuntime, "daemon_id": "other-" + daemonID,
+		"name": "Other pending source", "source_handle": "other-approved-handle", "mode": "observe",
+	})
+	fixtures.Insert(t, "work_source_command", testutil.Cols{
+		"id": testutil.Raw("gen_random_uuid()"), "workspace_id": testWorkspaceID,
+		"source_id": foreignSource, "request_id": uuid.NewString(), "config_revision": 1,
+		"command": "list", "status": "pending", "request_hash": "pending-other-runtime-test",
+	})
+	pendingPath := "/api/daemon/runtimes/" + runtimeID + "/work-source-commands"
+	call(http.MethodGet, pendingPath, testToken, testWorkspaceID, nil, http.StatusForbidden)
+	call(http.MethodGet, pendingPath, foreignToken, testWorkspaceID, nil, http.StatusForbidden)
+	pending := func() []map[string]any {
+		t.Helper()
+		var rows []map[string]any
+		if err := json.Unmarshal(call(http.MethodGet, pendingPath, ownerToken, testWorkspaceID, nil, http.StatusOK), &rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	if rows := pending(); len(rows) != 1 || rows[0]["id"] != commandID || rows[0]["source_handle"] != "router-approved-handle" || rows[0]["result"] != nil {
+		t.Fatalf("pending delivery lost scoped identity or leaked result: %v", rows)
+	}
+	fixtures.Exec(t, `UPDATE work_source SET enabled=false WHERE id=$1`, sourceID)
+	if rows := pending(); len(rows) != 0 {
+		t.Fatalf("disabled source delivered pending commands: %v", rows)
+	}
+	fixtures.Exec(t, `UPDATE work_source SET enabled=true, config_revision=config_revision+1 WHERE id=$1`, sourceID)
+	if rows := pending(); len(rows) != 0 {
+		t.Fatalf("stale configuration delivered pending commands: %v", rows)
+	}
+	fixtures.Exec(t, `UPDATE work_source SET config_revision=config_revision-1 WHERE id=$1`, sourceID)
+	fixtures.Exec(t, `UPDATE agent_runtime SET status='offline' WHERE id=$1`, runtimeID)
+	if rows := pending(); len(rows) != 0 {
+		t.Fatalf("offline runtime delivered pending commands: %v", rows)
+	}
+	fixtures.Exec(t, `UPDATE agent_runtime SET status='online' WHERE id=$1`, runtimeID)
+	fixtures.Exec(t, `UPDATE work_source_command SET expires_at=now()-interval '1 minute' WHERE id=$1`, commandID)
+	if rows := pending(); len(rows) != 0 {
+		t.Fatalf("expired command delivered as pending: %v", rows)
+	}
+	fixtures.Exec(t, `UPDATE work_source_command SET expires_at=now()+interval '5 minutes' WHERE id=$1`, commandID)
 	claimPath := "/api/daemon/runtimes/" + runtimeID + "/work-source-commands/" + commandID + "/claim"
 	call(http.MethodPost, claimPath, testToken, testWorkspaceID, nil, http.StatusForbidden)
 	call(http.MethodPost, claimPath, foreignToken, testWorkspaceID, nil, http.StatusForbidden)
 	call(http.MethodPost, claimPath, ownerToken, testWorkspaceID, nil, http.StatusOK)
+	if rows := pending(); len(rows) != 0 {
+		t.Fatalf("claimed command redelivered as pending: %v", rows)
+	}
 	call(http.MethodPost, claimPath, ownerToken, testWorkspaceID, nil, http.StatusConflict)
 	resultPath := "/api/daemon/runtimes/" + runtimeID + "/work-source-commands/" + commandID + "/result"
 	call(http.MethodPost, resultPath, foreignToken, testWorkspaceID, map[string]any{"status": "succeeded", "result": "[]"}, http.StatusForbidden)

@@ -493,6 +493,73 @@ func (q *Queries) ListExpiredWorkSourceCommandSources(ctx context.Context, limit
 	return items, nil
 }
 
+const listPendingWorkSourceCommandsForRuntime = `-- name: ListPendingWorkSourceCommandsForRuntime :many
+SELECT c.id, c.workspace_id, c.source_id, c.request_id, c.config_revision, c.expires_at, c.command, c.native_id, c.limit_count, c.status, c.claimed_runtime_id, c.claimed_at, c.request_hash, c.result, c.error, c.created_by, c.created_at, c.updated_at, s.source_handle
+FROM work_source_command c
+JOIN work_source s ON s.id = c.source_id AND s.workspace_id = c.workspace_id
+JOIN agent_runtime r ON r.id = s.runtime_id AND r.workspace_id = s.workspace_id
+WHERE r.id = $1 AND r.workspace_id = $2
+  AND r.daemon_id = $3 AND s.daemon_id = $3
+  AND r.status = 'online' AND s.enabled
+  AND c.status = 'pending' AND c.command IN ('list', 'read')
+  AND c.config_revision = s.config_revision
+  AND c.expires_at > statement_timestamp()
+ORDER BY c.created_at, c.id
+LIMIT 200
+`
+
+type ListPendingWorkSourceCommandsForRuntimeParams struct {
+	RuntimeID   pgtype.UUID `json:"runtime_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    pgtype.Text `json:"daemon_id"`
+}
+
+type ListPendingWorkSourceCommandsForRuntimeRow struct {
+	WorkSourceCommand WorkSourceCommand `json:"work_source_command"`
+	SourceHandle      string            `json:"source_handle"`
+}
+
+// Discovery is read-only. Claim must still recheck all fences under locks.
+func (q *Queries) ListPendingWorkSourceCommandsForRuntime(ctx context.Context, arg ListPendingWorkSourceCommandsForRuntimeParams) ([]ListPendingWorkSourceCommandsForRuntimeRow, error) {
+	rows, err := q.db.Query(ctx, listPendingWorkSourceCommandsForRuntime, arg.RuntimeID, arg.WorkspaceID, arg.DaemonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPendingWorkSourceCommandsForRuntimeRow{}
+	for rows.Next() {
+		var i ListPendingWorkSourceCommandsForRuntimeRow
+		if err := rows.Scan(
+			&i.WorkSourceCommand.ID,
+			&i.WorkSourceCommand.WorkspaceID,
+			&i.WorkSourceCommand.SourceID,
+			&i.WorkSourceCommand.RequestID,
+			&i.WorkSourceCommand.ConfigRevision,
+			&i.WorkSourceCommand.ExpiresAt,
+			&i.WorkSourceCommand.Command,
+			&i.WorkSourceCommand.NativeID,
+			&i.WorkSourceCommand.LimitCount,
+			&i.WorkSourceCommand.Status,
+			&i.WorkSourceCommand.ClaimedRuntimeID,
+			&i.WorkSourceCommand.ClaimedAt,
+			&i.WorkSourceCommand.RequestHash,
+			&i.WorkSourceCommand.Result,
+			&i.WorkSourceCommand.Error,
+			&i.WorkSourceCommand.CreatedBy,
+			&i.WorkSourceCommand.CreatedAt,
+			&i.WorkSourceCommand.UpdatedAt,
+			&i.SourceHandle,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWorkSourceCommandsBySource = `-- name: ListWorkSourceCommandsBySource :many
 SELECT id, workspace_id, source_id, request_id, config_revision, expires_at,
 command, native_id, limit_count, status, claimed_runtime_id, claimed_at,

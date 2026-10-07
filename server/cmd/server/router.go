@@ -1573,6 +1573,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// a secret never sits in a task record.
 		r.Get("/tasks/{id}/plugin-mcp/{contributionId}/credential", h.ResolvePluginMCPCredential)
 
+		r.Get("/runtimes/{runtimeId}/work-source-commands", workSourceCommands.ListPendingWorkSourceCommands)
 		r.Post("/runtimes/{runtimeId}/work-source-commands/{commandId}/claim", workSourceCommands.ClaimWorkSourceCommand)
 		r.Post("/runtimes/{runtimeId}/work-source-commands/{commandId}/result", workSourceCommands.ReportWorkSourceCommand)
 		r.Post("/runtimes/{runtimeId}/tasks/claim", h.ClaimTaskByRuntime)

@@ -108,3 +108,18 @@ WHERE source_id = $1 AND workspace_id = $2;
 -- Workspace teardown helper.
 DELETE FROM work_source_command
 WHERE workspace_id = $1;
+
+-- name: ListPendingWorkSourceCommandsForRuntime :many
+-- Discovery is read-only. Claim must still recheck all fences under locks.
+SELECT sqlc.embed(c), s.source_handle
+FROM work_source_command c
+JOIN work_source s ON s.id = c.source_id AND s.workspace_id = c.workspace_id
+JOIN agent_runtime r ON r.id = s.runtime_id AND r.workspace_id = s.workspace_id
+WHERE r.id = @runtime_id AND r.workspace_id = @workspace_id
+  AND r.daemon_id = @daemon_id AND s.daemon_id = @daemon_id
+  AND r.status = 'online' AND s.enabled
+  AND c.status = 'pending' AND c.command IN ('list', 'read')
+  AND c.config_revision = s.config_revision
+  AND c.expires_at > statement_timestamp()
+ORDER BY c.created_at, c.id
+LIMIT 200;
