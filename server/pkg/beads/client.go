@@ -10,6 +10,10 @@
 //   - show: `bd show --id=<id> --json` prints a JSON array with one issue
 //     (full detail, includes `revision`). A not-found ID exits 1 with a
 //     JSON error object on stdout.
+//   - raw outgoing edges: `bd --readonly --sandbox dep list --direction down
+//     --json -- <id> <id>` prints raw issue_id/depends_on_id/type records,
+//     including dangling/external endpoints. Repeated anchors select batch
+//     mode. Nonempty stderr, including missing-anchor warnings, is failure.
 //
 // Write qualification result (bd 1.3.1): `bd update` supports status and
 // assignee preconditions (`--if-status`, `--if-assignee`, exit 13 on stale
@@ -38,6 +42,9 @@ import (
 // maxOutputBytes caps bd stdout/stderr capture so a pathological source
 // cannot exhaust daemon memory.
 const maxOutputBytes = 4 << 20
+
+// MaxDependencies bounds one complete outgoing edge observation.
+const MaxDependencies = 512
 
 // defaultTimeout bounds every bd invocation when the caller supplies a
 // background context; a caller deadline always wins.
@@ -75,7 +82,36 @@ type IssueSummary struct {
 // Issue is one element of `bd show --id=<id> --json` output.
 type Issue struct {
 	IssueSummary
-	Revision string `json:"revision"`
+	// Revision is an item revision, not dependency topology CAS or an atomic snapshot.
+	Revision     string       `json:"revision"`
+	Dependencies []Dependency `json:"dependencies,omitempty"`
+	// Complete only for the separate raw edge read, not atomic with metadata
+	// or other items. Revision is never dependency topology CAS.
+	DependenciesComplete bool `json:"dependencies_complete,omitempty"`
+}
+
+// MarshalJSON keeps legacy receipt bytes unchanged while complete empty edge
+// observations explicitly carry [] rather than omitted or null dependencies.
+func (issue Issue) MarshalJSON() ([]byte, error) {
+	type plain Issue
+	if !issue.DependenciesComplete {
+		return json.Marshal(plain(issue))
+	}
+	dependencies := issue.Dependencies
+	if dependencies == nil {
+		dependencies = []Dependency{}
+	}
+	return json.Marshal(struct {
+		plain
+		Dependencies []Dependency `json:"dependencies"`
+	}{plain(issue), dependencies})
+}
+
+// Dependency retains the opaque predecessor endpoint and exact relation kind.
+// External endpoints and unknown/nonblocking kinds are data, not execution gates.
+type Dependency struct {
+	ID             string `json:"id"`
+	DependencyType string `json:"dependency_type"`
 }
 
 // ErrNotFound reports that the source has no issue with the native ID.
@@ -89,7 +125,7 @@ func (c *Client) List(ctx context.Context, limit int) ([]IssueSummary, error) {
 		args = append(args, "-n", fmt.Sprintf("%d", limit))
 	}
 	var rows []IssueSummary
-	if err := c.runJSON(ctx, args, &rows); err != nil {
+	if err := c.runJSON(ctx, args, &rows, false); err != nil {
 		return nil, err
 	}
 	// Payloads are untrusted source output: an empty or duplicated native ID
@@ -109,24 +145,56 @@ func (c *Client) List(ctx context.Context, limit int) ([]IssueSummary, error) {
 
 // ReadTask returns the full issue for a native ID.
 func (c *Client) ReadTask(ctx context.Context, nativeID string) (Issue, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
 	if strings.TrimSpace(nativeID) == "" {
 		return Issue{}, fmt.Errorf("beads: empty native ID")
 	}
 	var rows []Issue
-	if err := c.runJSON(ctx, []string{"show", "--id=" + nativeID, "--json"}, &rows); err != nil {
+	if err := c.runJSON(ctx, []string{"show", "--id=" + nativeID, "--json"}, &rows, false); err != nil {
 		return Issue{}, err
 	}
 	switch len(rows) {
 	case 1:
+		issue := rows[0]
 		// Trust boundary: the returned row must answer exactly the ID we
 		// asked for and carry the detail-only revision field.
-		if rows[0].ID != nativeID {
-			return Issue{}, fmt.Errorf("beads: show %q returned id %q", nativeID, rows[0].ID)
+		if issue.ID != nativeID {
+			return Issue{}, fmt.Errorf("beads: show %q returned id %q", nativeID, issue.ID)
 		}
-		if strings.TrimSpace(rows[0].Revision) == "" {
+		if strings.TrimSpace(issue.Revision) == "" {
 			return Issue{}, fmt.Errorf("beads: show %q returned no revision", nativeID)
 		}
-		return rows[0], nil
+		// Show silently drops failed/dangling dependency reads. Repeated exact
+		// anchors select bd 1.3.1's public raw batch operation instead of hydrated
+		// neighbors. Any warnings (including missing anchors) fail closed.
+		issue.DependenciesComplete = false
+		var edges []struct {
+			IssueID     string `json:"issue_id"`
+			DependsOnID string `json:"depends_on_id"`
+			Type        string `json:"type"`
+		}
+		args := []string{"--readonly", "--sandbox", "dep", "list", "--direction", "down", "--json", "--", nativeID, nativeID}
+		if err := c.runJSON(ctx, args, &edges, true); err != nil {
+			return Issue{}, err
+		}
+		if edges == nil || len(edges) > MaxDependencies {
+			return Issue{}, errors.New("beads: invalid raw dependency array")
+		}
+		dependencies := make([]Dependency, 0, len(edges))
+		seen := make(map[Dependency]bool, len(edges))
+		for _, edge := range edges {
+			dependency := Dependency{ID: edge.DependsOnID, DependencyType: edge.Type}
+			if edge.IssueID != nativeID || strings.TrimSpace(dependency.ID) == "" || strings.TrimSpace(dependency.DependencyType) == "" || seen[dependency] {
+				return Issue{}, errors.New("beads: invalid raw dependency edge")
+			}
+			seen[dependency] = true
+			dependencies = append(dependencies, dependency)
+		}
+		issue.Dependencies = dependencies
+		issue.DependencyCount = len(dependencies)
+		issue.DependenciesComplete = true
+		return issue, nil
 	case 0:
 		return Issue{}, fmt.Errorf("%w: %s", ErrNotFound, nativeID)
 	default:
@@ -146,7 +214,7 @@ type runError struct {
 
 // runJSON executes bd with argv args (no shell) against the approved source
 // directory and decodes its bounded stdout as JSON.
-func (c *Client) runJSON(ctx context.Context, args []string, dst any) error {
+func (c *Client) runJSON(ctx context.Context, args []string, dst any, rejectStderr bool) error {
 	if c.Executable == "" {
 		return fmt.Errorf("beads: no executable configured")
 	}
@@ -171,6 +239,21 @@ func (c *Client) runJSON(ctx context.Context, args []string, dst any) error {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	// Raw edge errors must not expose argv, executable/source paths, source
+	// diagnostics or decode details. Even exit-zero whitespace stderr fails.
+	if rejectStderr {
+		if ctx.Err() != nil {
+			return fmt.Errorf("beads: raw dependency read: %w", ctx.Err())
+		}
+		if err != nil || stdout.overflow(&stderr) != nil || len(stderr.Bytes()) != 0 {
+			return errors.New("beads: raw dependency read failed")
+		}
+		raw := bytes.TrimSpace(stdout.Bytes())
+		if len(raw) == 0 || raw[0] != '[' || json.Unmarshal(raw, dst) != nil {
+			return errors.New("beads: invalid raw dependency payload")
+		}
+		return nil
+	}
 	// An output-cap overflow must win over the command's own exit error:
 	// the payload is untrustworthy either way.
 	if oerr := stdout.overflow(&stderr); oerr != nil {

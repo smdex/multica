@@ -468,6 +468,24 @@ func validateWorkSourceCommandReport(cmd db.WorkSourceCommand, p *ReportWorkSour
 		if json.Unmarshal(raw, &issue) != nil || issue.ID != cmd.NativeID.String || strings.TrimSpace(issue.ID) == "" || strings.TrimSpace(issue.Revision) == "" {
 			return ErrWorkSourceCommandInvalidInput
 		}
+		// Completeness describes the qualified raw outgoing edge observation,
+		// not an atomic metadata/cross-item snapshot or revision topology CAS.
+		// Legacy omitted fields remain omitted for byte-identical terminal replay.
+		if issue.DependenciesComplete {
+			var evidence struct {
+				Count *int `json:"dependency_count"`
+			}
+			if json.Unmarshal(raw, &evidence) != nil || evidence.Count == nil || issue.Dependencies == nil || len(issue.Dependencies) > beads.MaxDependencies || *evidence.Count != len(issue.Dependencies) {
+				return ErrWorkSourceCommandInvalidInput
+			}
+			seen := make(map[beads.Dependency]bool, len(issue.Dependencies))
+			for _, dependency := range issue.Dependencies {
+				if strings.TrimSpace(dependency.ID) == "" || strings.TrimSpace(dependency.DependencyType) == "" || seen[dependency] {
+					return ErrWorkSourceCommandInvalidInput
+				}
+				seen[dependency] = true
+			}
+		}
 		value = issue
 	default:
 		return ErrWorkSourceCommandInvalidInput

@@ -104,7 +104,8 @@ printf '[{"id":"bd-1","title":"A","status":"open","priority":2,"issue_type":"tas
 
 func TestExecuteWorkSourceReadReadObjectWithRevision(t *testing.T) {
 	exe, dir := newFakeBD(t, `
-printf '%s\n' "args:$*" > "$FAKE_BD_DIR/record"
+printf '%s\n' "args:$*" "beads_dir:$BEADS_DIR" >> "$FAKE_BD_DIR/record"
+if [ "$1" != "show" ]; then printf '[]'; exit; fi
 printf '[{"id":"bd-1","title":"A","status":"open","priority":2,"issue_type":"task","created_at":"t","updated_at":"t","dependency_count":0,"dependent_count":0,"comment_count":0,"revision":"rev-9"}]'
 `)
 	b := binding(exe, dir)
@@ -128,10 +129,43 @@ printf '[{"id":"bd-1","title":"A","status":"open","priority":2,"issue_type":"tas
 	if !strings.Contains(string(rec), "show --id=bd-1 --json") {
 		t.Fatalf("unexpected argv: %q", rec)
 	}
+	want := "args:show --id=bd-1 --json\nbeads_dir:" + dir + "\nargs:--readonly --sandbox dep list --direction down --json -- bd-1 bd-1\nbeads_dir:" + dir + "\n"
+	if string(rec) != want || obj["dependencies_complete"] != true || obj["dependency_count"] != float64(0) {
+		t.Fatalf("two-call raw edge contract violated: %q / %v", rec, obj)
+	}
+}
+
+func TestExecuteWorkSourceReadDependencyEvidenceSurvivesRemarshal(t *testing.T) {
+	exe, dir := newFakeBD(t, `if [ "$1" = "show" ]; then
+printf '[{"id":"bd-c","revision":"unchanged","dependency_count":99,"dependencies":[{"id":"spoof","dependency_type":"spoof"}],"dependencies_complete":true}]'
+else
+printf '[{"issue_id":"bd-c","depends_on_id":"bd-a","type":"blocks"},{"issue_id":"bd-c","depends_on_id":"bd-b","type":"blocks"}]'
+fi`)
+	out, err := executeWorkSourceRead(context.Background(), []cli.WorkSourceReadBinding{binding(exe, dir)}, WorkSourceReadRequest{
+		WorkspaceID: boundWS, SourceHandle: "primary", Command: "read", NativeID: "bd-c",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, retained := range []string{`"id":"bd-a","dependency_type":"blocks"`, `"id":"bd-b","dependency_type":"blocks"`, `"revision":"unchanged"`} {
+		if !strings.Contains(string(out), retained) {
+			t.Fatalf("daemon lost dependency evidence %s: %s", retained, out)
+		}
+	}
+	if strings.Contains(string(out), `"title":"A"`) || strings.Contains(string(out), `"title":"B"`) {
+		t.Fatalf("daemon must preserve only typed dependency identity and relation: %s", out)
+	}
+	if !strings.Contains(string(out), `"dependencies_complete":true`) || !strings.Contains(string(out), `"dependency_count":2`) || strings.Contains(string(out), "spoof") {
+		t.Fatalf("raw evidence must replace show and claim qualified completeness: %s", out)
+	}
 }
 
 func TestExecuteWorkSourceReadHostileNativeIDOneArgv(t *testing.T) {
 	exe, dir := newFakeBD(t, `
+if [ "$1" != "show" ]; then
+  [ "$#" = 10 ] && [ "$9" = "bd-1; rm -rf /" ] && [ "${10}" = "$9" ] || exit 4
+  printf '[]'; exit
+fi
 id=$(printf '%s' "$*" | sed 's/.*--id=//;s/ --json//')
 printf '%s\n' "argc:$#" > "$FAKE_BD_DIR/record"
 printf '[{"id":"'"$id"'","title":"A","status":"open","priority":2,"issue_type":"task","created_at":"t","updated_at":"t","dependency_count":0,"dependent_count":0,"comment_count":0,"revision":"rev-9"}]'

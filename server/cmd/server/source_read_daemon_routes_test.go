@@ -22,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	"github.com/multica-ai/multica/server/pkg/beads"
 )
 
 // TestSourceReadDaemonDispatchThroughProductionRouter drives a real
@@ -49,10 +50,31 @@ func TestSourceReadDaemonDispatchThroughProductionRouter(t *testing.T) {
 		{"normal", "list", false},
 		{"lost-terminal-reply", "list", true},
 		{"detail", "read", false},
+		{"detail-lost-terminal-reply", "read", true},
 		{"source-failure", "missing", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) { exerciseSourceReadDaemon(t, tc.command, tc.loseReply) })
 	}
+}
+
+// The only non-fake executable in this explicitly gated test is the approved
+// Beads reader against a named disposable source. Agent discovery stays fake.
+func TestSourceReadQualifiedDaemonThroughProductionRouter(t *testing.T) {
+	if os.Getenv("MULTICA_RUN_BEADS_QUALIFICATION") != "1" {
+		t.Skip("explicit disposable Beads qualification only")
+	}
+	for _, name := range []string{"MULTICA_BEADS_ROOT", "MULTICA_BEADS_A", "MULTICA_BEADS_B", "MULTICA_BEADS_EXTERNAL"} {
+		if os.Getenv(name) == "" {
+			t.Fatal("qualified daemon acceptance requires all disposable source selectors")
+		}
+	}
+	if !filepath.IsAbs(os.Getenv("MULTICA_BEADS_EXECUTABLE")) || !filepath.IsAbs(os.Getenv("MULTICA_BEADS_DIRECTORY")) {
+		t.Fatal("qualified daemon acceptance requires absolute approved paths")
+	}
+	if testPool == nil {
+		t.Fatal("explicit qualified daemon acceptance requires the managed database")
+	}
+	exerciseSourceReadDaemon(t, "qualified-read", true)
 }
 
 func exerciseSourceReadDaemon(t *testing.T, command string, loseReply bool) {
@@ -102,10 +124,18 @@ esac
 		"printf '%s|%s\n' \"$BEADS_DIR\" \"$*\" >> \"$LAUNCH_LOG\"\n"+
 		"case \"$1:$2\" in\n"+
 		"list:--json) printf '[]' ;;\n"+
-		"show:--id=bd-1) printf '[{\"id\":\"bd-1\",\"revision\":\"r1\"}]' ;;\n"+
+		"show:--id=bd-1) printf '[{\"id\":\"bd-1\",\"revision\":\"r1\",\"dependency_count\":99,\"dependencies_complete\":true}]' ;;\n"+
+		"--readonly:--sandbox) printf '[{\"issue_id\":\"bd-1\",\"depends_on_id\":\"bd-a\",\"type\":\"blocks\"},{\"issue_id\":\"bd-1\",\"depends_on_id\":\"bd-b\",\"type\":\"blocks\"},{\"issue_id\":\"bd-1\",\"depends_on_id\":\"external:fixture:no-producer\",\"type\":\"future-kind\"}]' ;;\n"+
 		"*) printf 'SECRET fixture-path /.beads/archive' >&2; exit 5 ;;\n"+
 		"esac\n"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+
+	if command == "qualified-read" {
+		wrapper := "#!/bin/sh\nLAUNCH_LOG=" + shellQuote(launchLog) + "\nprintf '%s|%s\\n' \"$BEADS_DIR\" \"$*\" >> \"$LAUNCH_LOG\"\nexec " + shellQuote(os.Getenv("MULTICA_BEADS_EXECUTABLE")) + " \"$@\"\n"
+		if err := os.WriteFile(fakeBD, []byte(wrapper), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// --- PG fixtures: owned online runtime + observe work source, with the
@@ -116,7 +146,15 @@ esac
 	var sourceID, sourceHandle string
 	fx.QueryRow(t, `SELECT id, source_handle FROM work_source WHERE runtime_id=$1`, runtimeID).Scan(&sourceID, &sourceHandle)
 	bindingBeadsDir := filepath.Join(bdDir, "src", ".beads")
-	if err := os.MkdirAll(bindingBeadsDir, 0o755); err != nil {
+	if command == "qualified-read" {
+		bindingBeadsDir = os.Getenv("MULTICA_BEADS_DIRECTORY")
+	}
+	if command == "qualified-read" {
+		info, err := os.Stat(bindingBeadsDir)
+		if err != nil || !info.IsDir() {
+			t.Fatal("qualified disposable source directory must already exist")
+		}
+	} else if err := os.MkdirAll(bindingBeadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -132,6 +170,9 @@ esac
 	commandPath := "/api/work-sources/" + sourceID + "/commands"
 	commandBody := `{"request_id":"` + requestID + `","command":"list","limit":2}`
 	nativeID := "bd-1"
+	if command == "qualified-read" {
+		nativeID = os.Getenv("MULTICA_BEADS_ROOT")
+	}
 	if command == "missing" {
 		nativeID = "missing"
 	}
@@ -268,10 +309,27 @@ esac
 		if terminal.Status != "succeeded" || terminal.Result != "[]" || terminal.Error != "" {
 			t.Fatalf("list receipt wrong: %+v", terminal)
 		}
-	case "read":
-		var detail struct{ ID, Revision string }
-		if err := json.Unmarshal([]byte(terminal.Result), &detail); err != nil || terminal.Status != "succeeded" || detail.ID != "bd-1" || detail.Revision != "r1" || terminal.Error != "" {
-			t.Fatalf("detail receipt wrong: %+v, decode error: %v", terminal, err)
+	case "read", "qualified-read":
+		var detail beads.Issue
+		if err := json.Unmarshal([]byte(terminal.Result), &detail); err != nil || terminal.Status != "succeeded" || detail.ID != nativeID || strings.TrimSpace(detail.Revision) == "" || (command == "read" && detail.Revision != "r1") || terminal.Error != "" {
+			t.Fatal("detail receipt did not preserve successful native identity and revision")
+		}
+		want := []beads.Dependency{{ID: "bd-a", DependencyType: "blocks"}, {ID: "bd-b", DependencyType: "blocks"}, {ID: "external:fixture:no-producer", DependencyType: "future-kind"}}
+		if command == "qualified-read" {
+			want = []beads.Dependency{{ID: os.Getenv("MULTICA_BEADS_A"), DependencyType: "blocks"}, {ID: os.Getenv("MULTICA_BEADS_B"), DependencyType: "blocks"}, {ID: os.Getenv("MULTICA_BEADS_EXTERNAL"), DependencyType: "blocks"}}
+		}
+		if !detail.DependenciesComplete || detail.DependencyCount != 3 || len(detail.Dependencies) != 3 {
+			t.Fatal("strict raw topology did not survive the actual daemon and user receipt boundary")
+		}
+		remaining := make(map[beads.Dependency]bool, 3)
+		for _, edge := range want {
+			remaining[edge] = true
+		}
+		for _, edge := range detail.Dependencies {
+			if !remaining[edge] {
+				t.Fatal("strict receipt changed or duplicated an exact predecessor/type")
+			}
+			delete(remaining, edge)
 		}
 	case "missing":
 		if terminal.Status != "failed" || terminal.Result != "" || terminal.Error != "Source read failed; inspect local daemon configuration and source availability." {
@@ -279,10 +337,15 @@ esac
 		}
 	}
 
-	// --- Exactly one bd launch, bound to the exact workspace/handle pair.
+	// Exactly one execution of each required operation. Detail uses one show
+	// plus one raw-edge subprocess, never repeating either after report loss.
 	launches := readLaunches(t, launchLog)
-	if len(launches) != 1 {
-		t.Fatalf("want exactly one bd launch, got %d: %q", len(launches), launches)
+	wantLaunches := 1
+	if command == "read" || command == "qualified-read" {
+		wantLaunches = 2
+	}
+	if len(launches) != wantLaunches {
+		t.Fatalf("want %d required subprocess launches, got %d: %q", wantLaunches, len(launches), launches)
 	}
 	wantArgs := "list --json --flat -n 2"
 	if command != "list" {
@@ -290,6 +353,9 @@ esac
 	}
 	if launches[0] != bindingBeadsDir+"|"+wantArgs {
 		t.Fatalf("launch binding or argv wrong: %q", launches[0])
+	}
+	if command != "list" && command != "missing" && launches[1] != bindingBeadsDir+"|--readonly --sandbox dep list --direction down --json -- "+nativeID+" "+nativeID {
+		t.Fatalf("raw edge launch binding or argv wrong: %q", launches[1])
 	}
 
 	// --- Cancel and await a bounded Run return.
@@ -301,7 +367,7 @@ esac
 	}
 	// No further launch after shutdown.
 	after := readLaunches(t, launchLog)
-	if len(after) != 1 {
+	if len(after) != wantLaunches {
 		t.Fatalf("bd relaunched after cancel: %q", after)
 	}
 }
