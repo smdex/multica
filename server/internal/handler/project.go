@@ -628,6 +628,14 @@ func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	qtx := h.Queries.WithTx(tx)
 
+	if _, err := qtx.LockWorkspaceForChatSessionCreate(r.Context(), project.WorkspaceID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to lock workspace")
+		return
+	}
 	if _, err := qtx.LockProjectForDelete(r.Context(), db.LockProjectForDeleteParams{
 		ID:          project.ID,
 		WorkspaceID: project.WorkspaceID,
@@ -655,10 +663,15 @@ func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to delete project views")
 		return
 	}
+	// All source-dependent teardown locks sources before workflow rows.
 	if err := qtx.ClearWorkSourceProject(r.Context(), db.ClearWorkSourceProjectParams{
 		ProjectID: project.ID, WorkspaceID: project.WorkspaceID,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to detach project work sources")
+		return
+	}
+	if err := qtx.ClearWorkflowRunProject(r.Context(), db.ClearWorkflowRunProjectParams{ProjectID: project.ID, WorkspaceID: project.WorkspaceID}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to detach project workflow drafts")
 		return
 	}
 	if err := qtx.DeleteProject(r.Context(), db.DeleteProjectParams{

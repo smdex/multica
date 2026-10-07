@@ -23,6 +23,14 @@ export type {
   CreateWorkSourceCommandParams,
 } from "./work-source";
 export type {
+  WorkflowDraftGraphNode,
+  WorkflowDraftGraphEdge,
+  WorkflowDraftGraph,
+  WorkflowDraftNodeState,
+  WorkflowDraft,
+  CreateWorkflowDraftParams,
+} from "./workflow-draft";
+export type {
   Agent,
   AgentConversationStarter,
   AgentStatus,

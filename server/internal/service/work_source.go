@@ -245,12 +245,20 @@ func (s *WorkSourceService) ListWorkSources(ctx context.Context, workspaceID pgt
 // no-FK rule.
 func (s *WorkSourceService) DeleteWorkSourceCascade(ctx context.Context, workspaceID, sourceID pgtype.UUID) error {
 	return s.runInTx(ctx, func(q *db.Queries) error {
+		if _, err := q.LockWorkspaceForChatSessionCreate(ctx, workspaceID); errors.Is(err, pgx.ErrNoRows) {
+			return ErrWorkSourceNotFound
+		} else if err != nil {
+			return fmt.Errorf("lock workspace: %w", err)
+		}
 		if _, err := q.LockWorkSourceForWrite(ctx, db.LockWorkSourceForWriteParams{
 			ID: sourceID, WorkspaceID: workspaceID,
 		}); errors.Is(err, pgx.ErrNoRows) {
 			return ErrWorkSourceNotFound
 		} else if err != nil {
 			return fmt.Errorf("lock source: %w", err)
+		}
+		if err := q.DeleteWorkflowRunsForSource(ctx, db.DeleteWorkflowRunsForSourceParams{SourceID: sourceID, WorkspaceID: workspaceID}); err != nil {
+			return err
 		}
 		if _, err := q.DeleteWorkSourceCommandsForWorkSource(ctx, db.DeleteWorkSourceCommandsForWorkSourceParams{
 			SourceID: sourceID, WorkspaceID: workspaceID,

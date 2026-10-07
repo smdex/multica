@@ -448,6 +448,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
 	workSources := &handler.WorkSourceHandler{Handler: h, WorkSources: service.NewWorkSourceService(queries, pool)}
 	workSourceCommands := &handler.WorkSourceCommandHandler{Handler: h, Commands: service.NewWorkSourceCommandService(queries, pool)}
+	taskGraphs := &handler.TaskGraphHandler{Handler: h, Graphs: &service.TaskGraphService{Queries: queries, TxStarter: pool}}
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
 	invitationRateLimits.Actor.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_ACTOR_10M", invitationRateLimits.Actor.Limit)
 	invitationRateLimits.Workspace.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_WORKSPACE_24H", invitationRateLimits.Workspace.Limit)
@@ -1649,6 +1650,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(queries, patCache, cloudPATVerifier, cfSigner))
 		r.Use(middleware.RefreshCloudFrontCookies(cfSigner))
+		r.Post("/api/workflow-runs", taskGraphs.CreateWorkflowDraft)
+		r.Get("/api/workflow-runs/{runID}", taskGraphs.GetWorkflowDraft)
 		r.Get("/api/work-sources", workSources.ListWorkSources)
 		r.Post("/api/work-sources", workSources.CreateWorkSource)
 		r.Post("/api/work-sources/{sourceID}/commands", workSourceCommands.CreateWorkSourceCommand)

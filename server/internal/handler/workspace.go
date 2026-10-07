@@ -1235,6 +1235,10 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		{
+			name: "delete workflow drafts",
+			run:  func() error { return qtx.DeleteWorkflowRunsByWorkspace(ctx, requester.WorkspaceID) },
+		},
+		{
 			name: "delete work source commands",
 			run: func() error {
 				_, err := qtx.DeleteWorkSourceCommandsByWorkspace(ctx, requester.WorkspaceID)

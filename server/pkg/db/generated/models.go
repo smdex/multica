@@ -1829,6 +1829,23 @@ type WorkSourceCommand struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 }
 
+type WorkflowRun struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	ProjectID      pgtype.UUID        `json:"project_id"`
+	SourceID       pgtype.UUID        `json:"source_id"`
+	RequestID      pgtype.UUID        `json:"request_id"`
+	RequestHash    string             `json:"request_hash"`
+	RootNativeID   string             `json:"root_native_id"`
+	ConfigRevision int32              `json:"config_revision"`
+	Capacity       int32              `json:"capacity"`
+	Status         string             `json:"status"`
+	Graph          []byte             `json:"graph"`
+	NodeState      []byte             `json:"node_state"`
+	CreatedBy      pgtype.UUID        `json:"created_by"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
 type Workspace struct {
 	ID           pgtype.UUID        `json:"id"`
 	Name         string             `json:"name"`

@@ -4002,3 +4002,126 @@ export const WorkSourceCommandSchema = z.object({
   updated_at: z.string(),
 }).loose();
 export const WorkSourceCommandListSchema = z.array(WorkSourceCommandSchema);
+
+// Workflow drafts (see ../types/workflow-draft): frozen, non-executing
+// observation snapshots. Identity fields, graph bounds, and wire integrity
+// (scope agreement, node_state coverage, edge endpoints, digest shape) are
+// strict. A malformed draft rejects the whole response rather than coercing
+// an unknown status into something runnable. This validates wire integrity
+// only; graph construction stays in the server's draft builder.
+export const WorkflowDraftGraphNodeSchema = z.object({
+  native_id: z.string().min(1).refine((v) => v.trim().length > 0, {
+    message: "native_id is whitespace-only",
+  }),
+  revision: z.string().min(1).refine((v) => v.trim().length > 0, {
+    message: "revision is whitespace-only",
+  }),
+  title: z.string(),
+  status: z.string(),
+  receipt_id: z.string().min(1).refine((v) => v.trim().length > 0, {
+    message: "receipt_id is whitespace-only",
+  }),
+  observed_at: z.string(),
+});
+export const WorkflowDraftGraphEdgeSchema = z.object({
+  predecessor_native_id: z.string().min(1).refine((v) => v.trim().length > 0, {
+    message: "predecessor_native_id is whitespace-only",
+  }),
+  consumer_native_id: z.string().min(1).refine((v) => v.trim().length > 0, {
+    message: "consumer_native_id is whitespace-only",
+  }),
+  dependency_type: z.literal("blocks"),
+});
+export const WorkflowDraftGraphSchema = z.object({
+  workspace_id: z.string().min(1),
+  source_id: z.string().min(1),
+  root_native_id: z.string().min(1).refine((v) => v.trim().length > 0, {
+    message: "root_native_id is whitespace-only",
+  }),
+  config_revision: z.number().int().positive(),
+  nodes: z.array(WorkflowDraftGraphNodeSchema).min(1).max(128),
+  edges: z.array(WorkflowDraftGraphEdgeSchema).max(512),
+  digest: z.string().regex(/^[0-9a-f]{64}$/),
+});
+export const WorkflowDraftNodeStateSchema = z.object({
+  status: z.literal("blocked"),
+  reason: z.literal("draft"),
+});
+export const WorkflowDraftSchema = z
+  .object({
+    id: z.string().min(1),
+    workspace_id: z.string().min(1),
+    project_id: z.string().min(1).nullish().transform((v) => v ?? undefined),
+    source_id: z.string().min(1),
+    request_id: z.string().min(1),
+    root_native_id: z.string().min(1),
+    config_revision: z.number().int().positive(),
+    capacity: z.number().int().min(1).max(2),
+    status: z.literal("draft"),
+    graph: WorkflowDraftGraphSchema,
+    node_state: z.record(z.string(), WorkflowDraftNodeStateSchema),
+    created_by: z.string().nullish().transform((v) => v ?? undefined),
+    created_at: z.string(),
+  })
+  .loose()
+  .superRefine((draft, ctx) => {
+    const { graph, node_state } = draft;
+    if (
+      graph.workspace_id !== draft.workspace_id ||
+      graph.source_id !== draft.source_id ||
+      graph.root_native_id !== draft.root_native_id ||
+      graph.config_revision !== draft.config_revision
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["graph"],
+        message: "graph scope/config/root does not match the enclosing draft",
+      });
+      return;
+    }
+    const ids = new Set<string>();
+    for (const node of graph.nodes) {
+      if (ids.has(node.native_id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["graph", "nodes"],
+          message: `duplicate node native_id ${node.native_id}`,
+        });
+      }
+      ids.add(node.native_id);
+    }
+    if (!ids.has(graph.root_native_id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["graph", "root_native_id"],
+        message: "root_native_id is not a node in the graph",
+      });
+    }
+    for (const [i, edge] of graph.edges.entries()) {
+      if (!ids.has(edge.predecessor_native_id) || !ids.has(edge.consumer_native_id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["graph", "edges", i],
+          message: "edge endpoint is not a known node",
+        });
+      }
+    }
+    for (const key of Object.keys(node_state)) {
+      if (!ids.has(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["node_state", key],
+          message: "node_state key is not a known node native_id",
+        });
+      }
+    }
+    for (const node of graph.nodes) {
+      if (!node_state[node.native_id]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["node_state", node.native_id],
+          message: "node is missing its initial blocked/draft state",
+        });
+      }
+    }
+  });

@@ -243,6 +243,8 @@ import type {
   CreateIssueWorkLinkParams,
   WorkSourceCommand,
   CreateWorkSourceCommandParams,
+  WorkflowDraft,
+  CreateWorkflowDraftParams,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import type {
@@ -501,6 +503,7 @@ import {
   IssueWorkLinkListSchema,
   WorkSourceCommandSchema,
   WorkSourceCommandListSchema,
+  WorkflowDraftSchema,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -5483,5 +5486,33 @@ export class ApiClient {
       signal: params.signal,
     });
     return this.parseWorkSourceResponse<WorkSourceCommand[]>(raw, WorkSourceCommandListSchema, "GET /api/work-sources/:id/commands");
+  }
+
+  // Workflow drafts (see ../types/workflow-draft): frozen, non-executing
+  // observation snapshots. Create is idempotent by request_id: 201 for a new
+  // draft, 200 for an identical retry; both parse identically. There is
+  // deliberately no Start API.
+  async createWorkflowDraft(params: {
+    workspaceUuid: string;
+    body: CreateWorkflowDraftParams;
+  }): Promise<WorkflowDraft> {
+    const raw = await this.fetch<unknown>("/api/workflow-runs", {
+      method: "POST",
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      body: JSON.stringify(params.body),
+    });
+    return this.parseWorkSourceResponse<WorkflowDraft>(raw, WorkflowDraftSchema, "POST /api/workflow-runs");
+  }
+
+  async getWorkflowDraft(params: {
+    workspaceUuid: string;
+    draftId: string;
+    signal?: AbortSignal;
+  }): Promise<WorkflowDraft> {
+    const raw = await this.fetch<unknown>(`/api/workflow-runs/${params.draftId}`, {
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      signal: params.signal,
+    });
+    return this.parseWorkSourceResponse<WorkflowDraft>(raw, WorkflowDraftSchema, "GET /api/workflow-runs/:id");
   }
 }
