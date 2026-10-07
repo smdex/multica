@@ -2188,6 +2188,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.tokenRenewalLoop(ctx)
 	go d.workSourceReadLoop(ctx)
 
+	// Native domains stay exclusively owned until this loop has shut down.
+	// Join it before Run returns so a restart cannot race a still-held lock.
+	nativeEnrollmentDone := make(chan struct{})
+	go func() {
+		defer close(nativeEnrollmentDone)
+		d.nativeSourceEnrollmentLoop(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-nativeEnrollmentDone
+	}()
+
 	// Preflight succeeded and the background loops are up: the daemon has
 	// registered its runtimes and can now claim and run tasks. Flip /health
 	// from "starting" to "running" — this is the signal `daemon start`'s
