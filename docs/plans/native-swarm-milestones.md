@@ -199,7 +199,11 @@ Graph controls are still undelivered. The future browser checklist will cover so
 
 ## Milestone 10: scoped native enrollment authority
 
-[The enrollment authority milestone](native-enrollment-authority.md) records the verified backend routes, exact production-router/PostgreSQL outcomes and reproducible nonvisual checks. The local provisioning CLI and daemon enrollment loop remain under acceptance, not published operational delivery. Enrollment does not initialize Beads or start a graph.
+[The enrollment authority milestone](native-enrollment-authority.md) records the verified backend routes, exact production-router/PostgreSQL outcomes and reproducible nonvisual checks. At that backend-only checkpoint, local CLI/daemon delivery remained under acceptance; milestone 11 below supplies its verified operational increment. Enrollment does not initialize Beads or start a graph.
+
+## Milestone 11: operational dedicated enrollment
+
+The [operational enrollment ledger](native-enrollment-operational.md) records the exact verified CLI/domain/daemon and shared Sources metadata commits, actual public acceptance checks and operator/visual instructions. The native domain remains empty and disabled after enrollment: its manifest hash identifies the ownership marker, not Beads content or graph readiness. Explicit CLI and production Daemon.Run enrollment, lock ownership, exact retries, cancellation, authority fences and the real TypeScript client bridge passed immutable archive checks. No browser E2E was run. Native initialization, graph Start/admission, typed handoffs/mail, Web session control/restart and preferred jj execution remain unfinished.
 
 ## Publication boundary
 
