@@ -6,6 +6,19 @@ This milestone is not a complete swarm engine. It includes durable task-message 
 
 The link regression failed against the old PostgreSQL index, then passed after migrations 592-593. Source lifecycle, authorization, teardown, concurrent-index cleanup and the nonvisual foundation script passed. Beads writes remain disabled because revision CAS and atomic create attribution are not qualified. Default tests do not invoke installed agent CLIs or provider accounts.
 
+## Milestone 2: authenticated read-command receipts
+
+The read-only receipt API now supports stable request UUIDs, exact owning-daemon/runtime claims, canonical typed results, replay conflict detection, source-enabled/configuration fences, five-minute deadlines, bounded expiry sweeping, and source/workspace cleanup. The nonvisual foundation script includes the production HTTP router and actual JWT/daemon-token middleware, PostgreSQL lock-order regressions and malformed-result checks. Existing Issue/comment/workspace HTTP behavior also passed.
+
+| Interface | Contract |
+| --- | --- |
+| `POST /api/work-sources/{sourceID}/commands` | Workspace owner/admin submits `request_id` UUID and `command: "list"` with optional `limit` up to 200, or `command: "read"` with opaque `native_id`. Reuse the UUID only for retries of the same request. |
+| `GET /api/work-sources/{sourceID}/commands` | Workspace member reads bounded receipt history without result bodies. |
+| `GET /api/work-source-commands/{commandID}` | Workspace member reads the complete scoped receipt. |
+| Daemon claim/result routes | Require an actual `mdt_` credential matching the bound daemon, not a user JWT/PAT or a claimed daemon ID header. |
+
+**Automatic source reads are not delivered yet.** Daemon-local approved handle mapping, pending-command dispatch and daemon credential bootstrap remain next steps. Creating a receipt does not execute `bd`: unclaimed reads expire to a visible failed receipt. The HTTP regression uses a test-owned daemon credential and typed test result, not a real source executor. Observe-mode sources cannot start agents or write Beads data. There is still no new source explorer or swarm UI to visually test.
+
 ## Get the published milestone
 
 Use a separate clean checkout for periodic testing so ongoing implementation files cannot leak into the test build:
@@ -34,7 +47,7 @@ Inspect `devenv.nix` and any checkout-local override for the web/API addresses. 
 devenv shell -- bash -c 'cd server && go run ./cmd/migrate up'
 ```
 
-The migration command must use that checkout's managed `DATABASE_URL`. If authentication fails, inspect the declared service and its connection settings, do not reset passwords or create an assumed database. Do not run blanket migrations from the active implementation checkout while its unaccepted source-command migrations are present.
+The migration command must use that checkout's managed `DATABASE_URL`. If authentication fails, inspect the declared service and its connection settings, do not reset passwords or create an assumed database. Do not run blanket migrations from an active implementation checkout without first reviewing its pending changes. Command receipt migrations 589/590/594/595/596 were selectively applied and verified for milestone 2.
 
 Run the nonvisual acceptance suite with that managed connection:
 
@@ -46,7 +59,7 @@ The script fails if required tests are missing or skipped. It does not start ser
 
 ## User-owned browser checks
 
-No browser E2E or visual tests are run by the implementation agent. For this foundations-only milestone, check existing application behavior rather than looking for an undelivered swarm page:
+No browser E2E or visual tests are run by the implementation agent. For these foundations and receipt milestones, check existing application behavior rather than looking for an undelivered swarm page:
 
 1. Sign in using your existing local development account and open a workspace.
 2. Verify existing Issue lists, Issue detail and project navigation still render and preserve workspace context.

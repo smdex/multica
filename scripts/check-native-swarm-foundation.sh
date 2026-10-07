@@ -43,15 +43,21 @@ cd server
 run_checked 'TestReportTaskMessagesIdentifiedBatchReplay TestReportTaskMessagesIdentifiedBatchConcurrentReplay TestReportTaskMessagesLostReceiptThroughRealClient TestTaskMessageBatchIdentityUsesDecodedFields' \
   go test -race ./internal/handler \
   -run '^Test(ReportTaskMessages|CreateTaskMessagesBatchIsAtomic|TaskMessageCapabilities|TaskMessageBatchIdentity)' -count=1 -v
-run_checked TestEveryConcurrentUpBuildHasCleanup \
-  go test ./cmd/migrate -run '^TestEveryConcurrentUpBuildHasCleanup$' -count=1 -v
+run_checked 'TestEveryConcurrentUpBuildHasCleanup TestEveryConcurrentDownBuildHasCleanup' \
+  go test ./cmd/migrate -run '^TestEveryConcurrent(Up|Down)BuildHasCleanup$' -count=1 -v
 run_checked TestWorkflowRunSteersTheBoundSessionWithReplaySafety \
   go test -race ./internal/daemon \
   -run '^TestWorkflowRunSteersTheBoundSessionWithReplaySafety$' -count=1 -v
 
 run_checked 'TestWorkSourceManyToManyLinks TestWorkSourceLifecycle TestWorkSourceHandlerGuards TestWorkSourceDeleteLinkRace TestWorkSourceRuntimeTeardownRefusal TestWorkSourceRuntimeDeleteEndpoint409 TestWorkSourceParentDeletion TestWorkSourceRuntimeMergeRefusal' \
   go test -race ./internal/handler -run '^TestWorkSource(ManyToManyLinks|Lifecycle|HandlerGuards|DeleteLinkRace|RuntimeTeardownRefusal|RuntimeDeleteEndpoint409|ParentDeletion|RuntimeMergeRefusal)$' -count=1 -timeout 120s -v
+run_checked 'TestWorkSourceCommandCreateAllowlistAndGuards TestWorkSourceCommandOwnerRoutedClaimReport TestWorkSourceCommandRevisionDisabledAndExpired TestWorkSourceCommandWorkspaceRuntimeLockOrder TestWorkSourceCommandSourceDeletion TestWorkSourceCommandWorkspaceDeletion TestWorkspaceDeletionManifestCoversPublicSchema' \
+  go test -race ./internal/handler -run '^Test(WorkSourceCommand|WorkspaceDeletionManifestCoversPublicSchema)' -count=1 -timeout 120s -v
+run_checked 'TestValidateWorkSourceCommandReport TestWorkSourceCommandCanonicalResult' \
+  go test -race ./internal/service -run '^Test(ValidateWorkSourceCommandReport|WorkSourceCommandCanonicalResult)$' -count=1 -v
+run_checked 'TestWorkSourceCommandReceiptsThroughRouter TestSweepExpiredWorkSourceCommands' \
+  go test -race ./cmd/server -run '^Test(WorkSourceCommandReceiptsThroughRouter|SweepExpiredWorkSourceCommands)$' -count=1 -timeout 120s -v
 run_checked 'TestRuntimeGC_KeepsWorkSourceOwner TestRuntimeGC_KeepsTerminalTaskHistory' \
   go test -race ./cmd/server -run '^TestRuntimeGC' -count=1 -timeout 120s -v
 
-printf '\nReceipt, source lifecycle and same-session interface foundations verified. This is not full swarm E2E acceptance.\n'
+printf '\nReceipt, authenticated source-command transport, source lifecycle and same-session interface foundations verified. Automatic source dispatch and full swarm E2E remain separate acceptance.\n'

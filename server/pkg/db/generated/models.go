@@ -1808,6 +1808,27 @@ type WorkSource struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
+type WorkSourceCommand struct {
+	ID               pgtype.UUID        `json:"id"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	SourceID         pgtype.UUID        `json:"source_id"`
+	RequestID        pgtype.UUID        `json:"request_id"`
+	ConfigRevision   int32              `json:"config_revision"`
+	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
+	Command          string             `json:"command"`
+	NativeID         pgtype.Text        `json:"native_id"`
+	LimitCount       pgtype.Int4        `json:"limit_count"`
+	Status           string             `json:"status"`
+	ClaimedRuntimeID pgtype.UUID        `json:"claimed_runtime_id"`
+	ClaimedAt        pgtype.Timestamptz `json:"claimed_at"`
+	RequestHash      string             `json:"request_hash"`
+	Result           pgtype.Text        `json:"result"`
+	Error            pgtype.Text        `json:"error"`
+	CreatedBy        pgtype.UUID        `json:"created_by"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Workspace struct {
 	ID           pgtype.UUID        `json:"id"`
 	Name         string             `json:"name"`

@@ -447,6 +447,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
 	workSources := &handler.WorkSourceHandler{Handler: h, WorkSources: service.NewWorkSourceService(queries, pool)}
+	workSourceCommands := &handler.WorkSourceCommandHandler{Handler: h, Commands: service.NewWorkSourceCommandService(queries, pool)}
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
 	invitationRateLimits.Actor.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_ACTOR_10M", invitationRateLimits.Actor.Limit)
 	invitationRateLimits.Workspace.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_WORKSPACE_24H", invitationRateLimits.Workspace.Limit)
@@ -1572,6 +1573,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// a secret never sits in a task record.
 		r.Get("/tasks/{id}/plugin-mcp/{contributionId}/credential", h.ResolvePluginMCPCredential)
 
+		r.Post("/runtimes/{runtimeId}/work-source-commands/{commandId}/claim", workSourceCommands.ClaimWorkSourceCommand)
+		r.Post("/runtimes/{runtimeId}/work-source-commands/{commandId}/result", workSourceCommands.ReportWorkSourceCommand)
 		r.Post("/runtimes/{runtimeId}/tasks/claim", h.ClaimTaskByRuntime)
 		// Canonical machine-level batch claim (MUL-4257). `/claim` is a
 		// transitional alias; the daemon coordinator targets the canonical
@@ -1646,6 +1649,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Use(middleware.RefreshCloudFrontCookies(cfSigner))
 		r.Get("/api/work-sources", workSources.ListWorkSources)
 		r.Post("/api/work-sources", workSources.CreateWorkSource)
+		r.Post("/api/work-sources/{sourceID}/commands", workSourceCommands.CreateWorkSourceCommand)
+		r.Get("/api/work-sources/{sourceID}/commands", workSourceCommands.ListWorkSourceCommands)
+		r.Get("/api/work-source-commands/{commandID}", workSourceCommands.GetWorkSourceCommand)
 		r.Patch("/api/work-sources/{sourceID}", workSources.UpdateWorkSource)
 		r.Delete("/api/work-sources/{sourceID}", workSources.DeleteWorkSource)
 		r.Get("/api/issue-work-links", workSources.ListIssueWorkLinks)

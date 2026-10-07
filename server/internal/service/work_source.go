@@ -252,6 +252,11 @@ func (s *WorkSourceService) DeleteWorkSourceCascade(ctx context.Context, workspa
 		} else if err != nil {
 			return fmt.Errorf("lock source: %w", err)
 		}
+		if _, err := q.DeleteWorkSourceCommandsForWorkSource(ctx, db.DeleteWorkSourceCommandsForWorkSourceParams{
+			SourceID: sourceID, WorkspaceID: workspaceID,
+		}); err != nil {
+			return err
+		}
 		if _, err := q.DeleteIssueWorkLinksForWorkSource(ctx, db.DeleteIssueWorkLinksForWorkSourceParams{
 			SourceID: sourceID, WorkspaceID: workspaceID,
 		}); err != nil {

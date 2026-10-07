@@ -161,6 +161,7 @@ func runPeriodicSweep(ctx context.Context, interval time.Duration, sweep func())
 // When liveness is unavailable or errors, we fall back to trusting the DB
 // stale window — that is the original behavior.
 func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handler.LivenessStore, taskSvc *service.TaskService, bus *events.Bus, reconnectGrace time.Duration) {
+	sourceCommands := service.NewWorkSourceCommandService(queries, taskSvc.TxStarter)
 	runPeriodicSweep(ctx, sweepInterval, func() {
 		// These stages retain their existing cadence and ordering. Runtime GC and
 		// delegated-failure recovery run in independent lower-frequency loops.
@@ -170,7 +171,21 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 		sweepStaleTasks(ctx, queries, taskSvc, bus, reconnectGrace)
 		sweepExpiredQueuedTasks(ctx, queries, taskSvc, reconnectGrace)
 		sweepDeferredChatFinalizations(ctx, queries, taskSvc)
+		sweepExpiredWorkSourceCommands(ctx, sourceCommands)
 	})
+}
+
+func sweepExpiredWorkSourceCommands(ctx context.Context, commands *service.WorkSourceCommandService) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	count, err := commands.ExpireWorkSourceCommands(ctx, 200)
+	if err != nil {
+		slog.Warn("source command sweeper: expiration failed", "error", err)
+		return
+	}
+	if count > 0 {
+		slog.Info("source command sweeper: expired read commands", "count", count)
+	}
 }
 
 func runDelegatedFailureRecoverySweeper(ctx context.Context, taskSvc *service.TaskService) {
