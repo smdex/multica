@@ -58,7 +58,7 @@ func nseProvision(t *testing.T, profile string, backend string) (hash string, ro
 		backend = "http://127.0.0.1:1"
 	}
 	rootDir = nseLocalEnv(t)
-	if err := ProvisionNativeSourceLocal(profile, backend, nseLocalSource()); err != nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), profile, backend, nseLocalSource(), ""); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	local, err := LoadNativeSourceEnrollmentLocal(profile, backend, nseWorkspace, nseSourceID)
@@ -135,7 +135,7 @@ func TestNativeSourceEnrollmentLocalProvisionReplayWhileHeldIsNoop(t *testing.T)
 	}
 	defer held.Close()
 	// Replay with the exact same identity is a no-op while the lock is held.
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", nseLocalSource()); err != nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", nseLocalSource(), ""); err != nil {
 		t.Fatalf("replay while held must be a no-op: %v", err)
 	}
 	got, err := held.ManifestHash()
@@ -149,7 +149,7 @@ func TestNativeSourceEnrollmentLocalProvisionMismatchFails(t *testing.T) {
 	conflicting := nseLocalSource()
 	conflicting.DaemonID = "other-daemon"
 	conflicting.SourceHandle = "managed:" + nseSourceID
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", conflicting); err == nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", conflicting, ""); err == nil {
 		t.Fatal("mismatched identity accepted on replay")
 	}
 }
@@ -160,7 +160,7 @@ func TestNativeSourceEnrollmentLocalUnmarkedDomainFailsClosed(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(rootDir, nseSourceID), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", nseLocalSource()); err == nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", nseLocalSource(), ""); err == nil {
 		t.Fatal("empty unmarked domain adopted")
 	}
 	if _, err := os.Stat(filepath.Join(rootDir, nseSourceID, ".native_owner")); !os.IsNotExist(err) {
@@ -186,7 +186,7 @@ func TestNativeSourceEnrollmentLocalMissingLockFailsClosed(t *testing.T) {
 	if _, err := execenv.OpenNativeSource(root, id); err == nil {
 		t.Fatal("missing lock accepted on domain open")
 	}
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", nseLocalSource()); err == nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", nseLocalSource(), ""); err == nil {
 		t.Fatal("missing lock recreated by provision")
 	}
 }
@@ -194,7 +194,7 @@ func TestNativeSourceEnrollmentLocalMissingLockFailsClosed(t *testing.T) {
 func TestNativeSourceEnrollmentLocalTaskLocalReject(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(cli.TaskConfigRootEnv, t.TempDir())
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", nseLocalSource()); err == nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", nseLocalSource(), ""); err == nil {
 		t.Fatal("task-local provision accepted")
 	}
 	if _, err := LoadNativeSourceEnrollmentLocal("", "http://127.0.0.1:1", nseWorkspace, nseSourceID); err == nil {
@@ -223,7 +223,7 @@ func TestNativeSourceEnrollmentLocalGlobalRootAcrossProfiles(t *testing.T) {
 		t.Fatal("load without index accepted")
 	}
 	// Provisioning through beta reuses the same physical domain: still one leaf.
-	if err := ProvisionNativeSourceLocal("beta", "http://127.0.0.1:1", nseLocalSource()); err != nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "beta", "http://127.0.0.1:1", nseLocalSource(), ""); err != nil {
 		t.Fatalf("provision via beta: %v", err)
 	}
 	leaves, err := os.ReadDir(rootDir)
@@ -278,7 +278,7 @@ func TestNativeSourceEnrollmentLocalProvisionIdleIdenticalReplayNoop(t *testing.
 	idxBefore := mustRead(t, idxPath)
 	// Second identical provision with no daemon holding the lock: no-op, no
 	// "already exists" error, no index overwrite.
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", nseLocalSource()); err != nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", nseLocalSource(), ""); err != nil {
 		t.Fatalf("idle identical replay must be a no-op: %v", err)
 	}
 	after, err := os.ReadDir(rootDir)
@@ -297,7 +297,7 @@ func TestNativeSourceEnrollmentLocalProvisionEnabledEnrolledExistingReplay(t *te
 	replay.NativeManifestHash = hash
 	replay.NativeEnrolledAt = "2026-10-07T11:00:00Z"
 	replay.Enabled = true // terminal HTTP 200 replay may already be enabled
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", replay); err != nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", replay, ""); err != nil {
 		t.Fatalf("enabled enrolled replay: %v", err)
 	}
 }
@@ -308,7 +308,7 @@ func TestNativeSourceEnrollmentLocalProvisionApprovedMissingDomainRejectsNoCreat
 	approved.NativeEnrollmentStatus = "enrolled"
 	approved.NativeManifestHash = strings.Repeat("a", 64)
 	approved.NativeEnrolledAt = "2026-10-07T11:00:00Z"
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", approved); err == nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", approved, ""); err == nil {
 		t.Fatal("approved source with missing domain provisioned")
 	}
 	rootDir, _ := nseHomeNativeSources()
@@ -336,7 +336,7 @@ func TestNativeSourceEnrollmentLocalRootSymlinkAndPublicPermsRejected(t *testing
 	if err := os.Symlink(filepath.Join(home, "elsewhere"), filepath.Join(base, nativeSourcesDir)); err != nil {
 		t.Fatal(err)
 	}
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", nseLocalSource()); err == nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", nseLocalSource(), ""); err == nil {
 		t.Fatal("symlinked global root accepted")
 	}
 	// World-readable pre-existing inbox: rejected without chmod adoption and
@@ -417,13 +417,13 @@ func TestNativeSourceEnrollmentLocalApprovedPendingHashMustAgree(t *testing.T) {
 	// hash: rejected against both index and held domain.
 	approvedPending := nseLocalSource()
 	approvedPending.NativeManifestHash = strings.Repeat("b", 64) // != local hash
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", approvedPending); err == nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", approvedPending, ""); err == nil {
 		t.Fatal("approved pending with mismatched server hash accepted")
 	}
 	// Same replay with the agreeing hash is a no-op.
 	agreeing := nseLocalSource()
 	agreeing.NativeManifestHash = hash
-	if err := ProvisionNativeSourceLocal("", "http://127.0.0.1:1", agreeing); err != nil {
+	if err := ProvisionNativeSourceLocal(context.Background(), "", "http://127.0.0.1:1", agreeing, ""); err != nil {
 		t.Fatalf("approved pending with agreeing hash: %v", err)
 	}
 }

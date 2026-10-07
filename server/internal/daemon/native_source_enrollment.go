@@ -370,7 +370,7 @@ func writeStrictRootFile(root *os.Root, final string, value any) error {
 // publishes the profile index entry, and returns. The source owner lock is
 // held across validation and publication, then released: the daemon (not the
 // CLI) retains it after restart.
-func ProvisionNativeSourceLocal(profile, backendURL string, source NativeSourceEnrollment) error {
+func ProvisionNativeSourceLocal(ctx context.Context, profile, backendURL string, source NativeSourceEnrollment, executable string) error {
 	if err := rejectTaskLocalEnrollment(); err != nil {
 		return err
 	}
@@ -430,7 +430,7 @@ func ProvisionNativeSourceLocal(profile, backendURL string, source NativeSourceE
 		// open only, never fresh creation.
 		domain, err = execenv.OpenNativeSource(root, id)
 		if err != nil {
-			if errors.Is(err, execenv.ErrNativeSourceBusy) {
+			if errors.Is(err, execenv.ErrNativeSourceBusy) && executable == "" {
 				// Daemon holds the exact domain; the index already records this
 				// identity, so the replay changes nothing.
 				return nil
@@ -440,7 +440,7 @@ func ProvisionNativeSourceLocal(profile, backendURL string, source NativeSourceE
 	} else {
 		domain, err = execenv.CreateNativeSource(root, id)
 		if err != nil {
-			if errors.Is(err, execenv.ErrNativeSourceBusy) && existing != nil {
+			if errors.Is(err, execenv.ErrNativeSourceBusy) && existing != nil && executable == "" {
 				// Daemon holds the exact domain and the index already records this
 				// identity: replaying provision changes nothing.
 				return nil
@@ -452,7 +452,7 @@ func ProvisionNativeSourceLocal(profile, backendURL string, source NativeSourceE
 			// marker must match this identity exactly; anything else fails closed.
 			domain, err = execenv.OpenNativeSource(root, id)
 			if err != nil {
-				if errors.Is(err, execenv.ErrNativeSourceBusy) && existing != nil {
+				if errors.Is(err, execenv.ErrNativeSourceBusy) && existing != nil && executable == "" {
 					return nil
 				}
 				return fmt.Errorf("native enrollment: reopen source %s: %w", id.SourceID, err)
@@ -476,6 +476,15 @@ func ProvisionNativeSourceLocal(profile, backendURL string, source NativeSourceE
 		if existing.ManifestHash != hash {
 			return fmt.Errorf("native enrollment: indexed hash does not match local domain for source %s", id.SourceID)
 		}
+	}
+	// Hold the source lock across initialization and index publication. A
+	// running daemon must never adopt this source in between these steps.
+	if executable != "" {
+		if err := execenv.InitializeNativeSource(ctx, domain, executable); err != nil {
+			return err
+		}
+	}
+	if existing != nil {
 		return nil
 	}
 	if err := writeStrictRootFile(indexRoot, nativeSourceIndexName(id.SourceID), nativeSourceIndexEntry{

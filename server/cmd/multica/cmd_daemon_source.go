@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -21,7 +23,7 @@ var daemonSourceCmd = &cobra.Command{
 var daemonSourceProvisionCmd = &cobra.Command{
 	Use:   "provision",
 	Short: "Create a fresh native source and its local ownership marker",
-	Long:  "Creates a disabled native source and a fresh machine-global domain. It does not initialize Beads or enable execution. Restart the daemon after provisioning so it can hold the domain ownership lock, then approve the source.",
+	Long:  "Creates a disabled native source and a fresh machine-global domain. Optional --beads-executable initializes a fresh domain with Beads 1.3.1 on Linux before daemon adoption. It never enables execution or repairs an existing domain. Restart the daemon after provisioning so it can hold the domain ownership lock, then approve the source.",
 	Args:  cobra.NoArgs,
 	RunE:  runDaemonSourceProvision,
 }
@@ -44,6 +46,7 @@ var daemonSourceStatusCmd = &cobra.Command{
 func init() {
 	daemonCmd.AddCommand(daemonSourceCmd)
 	daemonSourceCmd.AddCommand(daemonSourceProvisionCmd, daemonSourceApproveCmd, daemonSourceStatusCmd)
+	daemonSourceProvisionCmd.Flags().String("beads-executable", "", "Explicit absolute Beads 1.3.1 executable for fresh Linux initialization")
 	daemonSourceCmd.PersistentFlags().String("workspace", "", "Workspace UUID")
 	daemonSourceCmd.PersistentFlags().String("daemon-id", "", "Daemon identity override, matching daemon start")
 	_ = daemonSourceCmd.MarkPersistentFlagRequired("workspace")
@@ -101,6 +104,10 @@ func runDaemonSourceProvision(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	executable, _ := cmd.Flags().GetString("beads-executable")
+	if executable != "" && (!filepath.IsAbs(executable) || filepath.Clean(executable) != executable || runtime.GOOS != "linux") {
+		return fmt.Errorf("native initialization requires an absolute Beads 1.3.1 executable on Linux")
+	}
 	workspaceID, _ := cmd.Flags().GetString("workspace")
 	runtimeID, _ := cmd.Flags().GetString("runtime")
 	requestID, _ := cmd.Flags().GetString("request-id")
@@ -109,8 +116,8 @@ func runDaemonSourceProvision(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := daemon.ProvisionNativeSourceLocal(profile, baseURL, source); err != nil {
-		return fmt.Errorf("server intent exists, but local provisioning failed. Retry with the same request UUID: %w", err)
+	if err := daemon.ProvisionNativeSourceLocal(cmd.Context(), profile, baseURL, source, executable); err != nil {
+		return fmt.Errorf("server intent exists, but local provisioning or initialization failed. Keep the same request UUID and do not reset the domain: %w", err)
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(source)
 }

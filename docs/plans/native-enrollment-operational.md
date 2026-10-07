@@ -1,6 +1,6 @@
 # Operational native source enrollment
 
-Date: October 7, 2026. This slice adds dedicated local ownership and daemon enrollment to the [scoped authority milestone](native-enrollment-authority.md). It is not full native swarm delivery. Enrollment does not initialize Beads, attest source contents, prove process-tree quiescence, or permit graph Start.
+Date: October 7, 2026. This slice adds dedicated local ownership and daemon enrollment to the [scoped authority milestone](native-enrollment-authority.md). It is not full native swarm delivery. Enrollment alone does not initialize Beads, attest source contents, prove process-tree quiescence, or permit graph Start. Optional fresh Linux initialization is documented in [native source initialization](native-source-initialization.md).
 
 Exact code commits `1207e18944361d925b63bd5fbcc07730f4110141` (CLI/domain/daemon) and `79f23bb3e8c16920e5baca6a547f54a261d5c647` (shared metadata/UI/client bridge) passed immutable archive acceptance on October 7 in task `6042156gfk`. The archive-built CLI, production Daemon.Run, enrollment authority/lock waits and actual TypeScript HTTP client each ran their explicit public integration gates, including three enrollment/client iterations without skips. Core/views types, changed-file lint, race suites, compatibility, migration cleanup, vet and both builds passed. Browser/visual E2E and full graph execution were not run.
 
