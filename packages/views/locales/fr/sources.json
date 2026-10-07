@@ -34,5 +34,9 @@
   "status_unknown": "L'issue de cette lecture n'est pas encore connue.",
   "history_error": "Impossible de charger les lectures existantes.",
   "history_none": "Sélectionner une lecture précédente…",
-  "source_disabled_hint": "Cette source est désactivée. Les nouvelles lectures sont bloquées, mais les résultats existants restent consultables."
+  "source_disabled_hint": "Cette source est désactivée. Les nouvelles lectures sont bloquées, mais les résultats existants restent consultables.",
+  "native_status_pending": "Enrôlement natif : en attente d'approbation.",
+  "native_status_enrolled": "Enrôlement natif : approuvé.",
+  "native_status_unavailable": "Enrôlement natif indisponible.",
+  "native_readonly_note": "Les métadonnées sont en lecture seule et l'exécution de graphe n'est pas disponible pour les sources natives ; l'activation nécessite un enrôlement approuvé."
 }

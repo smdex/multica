@@ -3961,6 +3961,21 @@ export const WorkSourceSchema = z.object({
   config_revision: z.number().int().nonnegative().nullish().catch(0).transform((v) => v ?? 0),
   last_health: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
   last_error: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
+  // An omitted key stays omitted (observe-only servers); a present but
+  // null/invalid value falls back to "unknown", never "enrolled", so a
+  // malformed response can never unblock enabling.
+  native_enrollment_id: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
+  native_enrollment_status: z.preprocess(
+    (v) =>
+      v === undefined || v === "pending" || v === "enrolled"
+        ? v
+        : "unknown",
+    z.enum(["pending", "enrolled", "unknown"]).optional(),
+  ),
+  native_manifest_hash: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
+  native_owner_member_id: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
+  native_runtime_created_at: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
+  native_enrolled_at: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
   created_by: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
   created_at: z.string(),
   updated_at: z.string(),

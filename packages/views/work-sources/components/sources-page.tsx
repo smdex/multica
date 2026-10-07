@@ -5,9 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Database, TriangleAlert } from "lucide-react";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useCurrentMember } from "@multica/core/permissions";
-import {
-  workSourcesOptions,
-} from "@multica/core/work-sources/queries";
+import { workSourcesOptions } from "@multica/core/work-sources/queries";
 import type { WorkSource } from "@multica/core/types";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import {
@@ -103,6 +101,16 @@ export function SourcesPage() {
             </p>
           ) : null}
 
+          {selected?.mode === "native" ? (
+            <p className="text-caption text-muted-foreground" role="status">
+              {selected.native_enrollment_status === "enrolled"
+                ? t(($) => $.native_status_enrolled)
+                : selected.native_enrollment_status === "pending"
+                  ? t(($) => $.native_status_pending)
+                  : t(($) => $.native_status_unavailable)}{" "}
+              {t(($) => $.native_readonly_note)}
+            </p>
+          ) : null}
           {selected ? (
             selected.workspace_id === wsId ? (
               <div className="flex flex-col gap-6">

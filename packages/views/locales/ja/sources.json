@@ -34,5 +34,9 @@
   "status_unknown": "この読み取りの結果はまだわかりません。",
   "history_error": "既存の読み取り結果を読み込めませんでした。",
   "history_none": "過去の読み取りを選択…",
-  "source_disabled_hint": "このソースは無効です。新しい読み取りはできませんが、既存の結果は確認できます。"
+  "source_disabled_hint": "このソースは無効です。新しい読み取りはできませんが、既存の結果は確認できます。",
+  "native_status_pending": "ネイティブ登録：承認待ち。",
+  "native_status_enrolled": "ネイティブ登録：承認済み。",
+  "native_status_unavailable": "ネイティブ登録を利用できません。",
+  "native_readonly_note": "メタデータは読み取り専用で、ネイティブソースではグラフ実行を利用できません。有効化には承認済みの登録が必要です。"
 }

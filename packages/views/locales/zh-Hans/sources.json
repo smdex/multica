@@ -34,5 +34,9 @@
   "status_unknown": "尚不清楚这次读取的结果。",
   "history_error": "无法加载已有的读取结果。",
   "history_none": "选择一次历史读取…",
-  "source_disabled_hint": "此工作源已停用。新的读取被阻止，但已有结果仍可查看。"
+  "source_disabled_hint": "此工作源已停用。新的读取被阻止，但已有结果仍可查看。",
+  "native_status_pending": "原生注册：等待批准。",
+  "native_status_enrolled": "原生注册：已批准。",
+  "native_status_unavailable": "原生注册不可用。",
+  "native_readonly_note": "元数据为只读，原生工作源不支持图执行；启用需要已批准的注册。"
 }

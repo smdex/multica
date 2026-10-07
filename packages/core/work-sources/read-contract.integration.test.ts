@@ -30,6 +30,9 @@ const LIST_REQUEST = process.env.MULTICA_SOURCE_READ_CONTRACT_LIST_REQUEST ?? ""
 const READ_COMMAND = process.env.MULTICA_SOURCE_READ_CONTRACT_READ_COMMAND ?? "";
 const DEFAULT_LIST_COMMAND = process.env.MULTICA_SOURCE_READ_CONTRACT_DEFAULT_LIST_COMMAND ?? "";
 const DEFAULT_LIST_REQUEST = process.env.MULTICA_SOURCE_READ_CONTRACT_DEFAULT_LIST_REQUEST ?? "";
+const PENDING_SOURCE_ID = process.env.MULTICA_SOURCE_READ_CONTRACT_PENDING_SOURCE_ID ?? "";
+const ENROLLED_SOURCE_ID = process.env.MULTICA_SOURCE_READ_CONTRACT_ENROLLED_SOURCE_ID ?? "";
+const ENROLLED_HASH = process.env.MULTICA_SOURCE_READ_CONTRACT_ENROLLED_HASH ?? "";
 const ready = [
   BASE_URL,
   TOKEN,
@@ -40,11 +43,14 @@ const ready = [
   READ_COMMAND,
   DEFAULT_LIST_COMMAND,
   DEFAULT_LIST_REQUEST,
+  PENDING_SOURCE_ID,
+  ENROLLED_SOURCE_ID,
+  ENROLLED_HASH,
 ].every((v) => v !== "");
 
 if (RUN && !ready) {
   throw new Error(
-    "MULTICA_SOURCE_READ_CONTRACT_RUN=1 requires every MULTICA_SOURCE_READ_CONTRACT_* selector: BASE_URL, TOKEN, WORKSPACE, SOURCE_ID, LIST_COMMAND, LIST_REQUEST, READ_COMMAND, DEFAULT_LIST_COMMAND, DEFAULT_LIST_REQUEST",
+    "MULTICA_SOURCE_READ_CONTRACT_RUN=1 requires every MULTICA_SOURCE_READ_CONTRACT_* selector: BASE_URL, TOKEN, WORKSPACE, SOURCE_ID, LIST_COMMAND, LIST_REQUEST, READ_COMMAND, DEFAULT_LIST_COMMAND, DEFAULT_LIST_REQUEST, PENDING_SOURCE_ID, ENROLLED_SOURCE_ID, ENROLLED_HASH",
   );
 }
 
@@ -63,6 +69,33 @@ describe.skipIf(!RUN)("work-source read contract (integration, Go production ser
     expect(hit, "prepared source must appear in the production source list").toBeDefined();
     expect(hit!.workspace_id).toBe(wsId);
     expect(hit!.mode).toBe("observe");
+  });
+
+  it("native enrollment metadata survives the real list schema for pending and enrolled sources", async () => {
+    const sources = await client.listWorkSources({ workspaceUuid: wsId });
+    const pending = sources.find((s) => s.id === PENDING_SOURCE_ID);
+    expect(pending, "pending native source must appear in the production source list").toBeDefined();
+    expect(pending!.workspace_id).toBe(wsId);
+    expect(pending!.mode).toBe("native");
+    expect(pending!.enabled).toBe(false);
+    expect(pending!.native_enrollment_id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(pending!.native_enrollment_status).toBe("pending");
+    expect(pending!.native_manifest_hash).toBeUndefined();
+    expect(pending!.native_owner_member_id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(Number.isFinite(Date.parse(pending!.native_runtime_created_at ?? ""))).toBe(true);
+    expect(pending!.native_enrolled_at).toBeUndefined();
+
+    const enrolled = sources.find((s) => s.id === ENROLLED_SOURCE_ID);
+    expect(enrolled, "enrolled native source must appear in the production source list").toBeDefined();
+    expect(enrolled!.workspace_id).toBe(wsId);
+    expect(enrolled!.mode).toBe("native");
+    expect(enrolled!.native_enrollment_id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(enrolled!.native_enrollment_id).not.toBe(pending!.native_enrollment_id);
+    expect(enrolled!.native_enrollment_status).toBe("enrolled");
+    expect(enrolled!.native_manifest_hash).toBe(ENROLLED_HASH);
+    expect(enrolled!.native_owner_member_id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(Number.isFinite(Date.parse(enrolled!.native_runtime_created_at ?? ""))).toBe(true);
+    expect(Number.isFinite(Date.parse(enrolled!.native_enrolled_at ?? ""))).toBe(true);
   });
 
   it("parses a canonical succeeded list receipt with unknown status preserved", async () => {

@@ -505,4 +505,32 @@ describe("SourcesPage", () => {
     );
     expect(mockCreateWorkSourceCommand).not.toHaveBeenCalled();
   });
+
+  it("shows pending and unknown native enrollment without execution controls", async () => {
+    const user = userEvent.setup();
+    mockListWorkSources.mockResolvedValue([
+      source({ mode: "native", enabled: false, native_enrollment_status: "pending" }),
+      source({ id: "source-legacy", name: "Legacy native", mode: "native", enabled: false }),
+      source({ id: "source-unknown", name: "Unknown native", mode: "native", enabled: false, native_enrollment_status: "unknown" }),
+    ]);
+    await renderPage();
+    expect(await screen.findByText(/awaiting approval/i)).toBeInTheDocument();
+    expect(screen.getByText(/graph execution is unavailable/i)).toBeInTheDocument();
+    const select = screen.getByRole("combobox", { name: /^source/i });
+    for (const id of ["source-legacy", "source-unknown"]) {
+      await user.selectOptions(select, id);
+      expect(await screen.findByText(/native enrollment unavailable/i)).toBeInTheDocument();
+    }
+    expect(screen.queryByRole("button", { name: /^(enable|start)$/i })).not.toBeInTheDocument();
+    expect(mockCreateWorkSourceCommand).not.toHaveBeenCalled();
+  });
+
+  it("shows enrolled native status while keeping metadata and graph execution read-only", async () => {
+    mockListWorkSources.mockResolvedValue([
+      source({ mode: "native", enabled: false, native_enrollment_status: "enrolled" }),
+    ]);
+    await renderPage();
+    expect(await screen.findByText(/native enrollment: enrolled/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^(enable|start)$/i })).not.toBeInTheDocument();
+  });
 });

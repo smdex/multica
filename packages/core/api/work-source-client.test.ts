@@ -57,6 +57,30 @@ describe("work source client", () => {
     expect(list[0]?.source_handle).toBe("beads-main");
   });
 
+  it("omits native enrollment fields for observe sources without them", async () => {
+    stubFetch([source]);
+    const client = new ApiClient("https://api.example.test");
+    const [parsed] = await client.listWorkSources({ workspaceUuid: "ws-1" });
+    expect(parsed?.native_enrollment_id).toBeUndefined();
+    expect(parsed?.native_enrollment_status).toBeUndefined();
+  });
+
+  it("parses native enrollment fields and falls back unknown status to unknown", async () => {
+    stubFetch([
+      { ...source, mode: "native", native_enrollment_status: "enrolled", native_enrollment_id: "ne-1" },
+      { ...source, id: "src-2", native_enrollment_status: "pending" },
+      { ...source, id: "src-3", native_enrollment_status: "nonsense" },
+      { ...source, id: "src-4", native_enrollment_status: null },
+    ]);
+    const client = new ApiClient("https://api.example.test");
+    const list = await client.listWorkSources({ workspaceUuid: "ws-1" });
+    expect(list[0]?.native_enrollment_status).toBe("enrolled");
+    expect(list[1]?.native_enrollment_status).toBe("pending");
+    // Unknown/legacy statuses fall back to "unknown", never "enrolled".
+    expect(list[2]?.native_enrollment_status).toBe("unknown");
+    expect(list[3]?.native_enrollment_status).toBe("unknown");
+  });
+
   it("rejects a malformed source list instead of faking an empty one", async () => {
     stubFetch(null); // server sent JSON null
     const client = new ApiClient("https://api.example.test");

@@ -1,10 +1,15 @@
 /**
- * Work sources: scoped bindings to an external native work-tracking source
- * (e.g. a Beads project), owned by an agent runtime. Read-only "observe"
- * bindings whose identity (workspace, optional project scope, runtime/daemon
- * owner, source handle) is immutable after creation; only name and the
- * enabled flag may change.
+ * Work sources: workspace-scoped native work-tracking bindings (e.g. Beads),
+ * owned by an agent runtime. Observe sources are read-only. Native sources
+ * require dedicated-domain enrollment before enablement. Binding identity
+ * (workspace, project scope, runtime, daemon and handle) is immutable.
  */
+
+/** Native enrollment state reported by the server for "native" mode sources. */
+export type WorkSourceNativeEnrollmentStatus =
+  | "pending"
+  | "enrolled"
+  | "unknown";
 
 export interface WorkSource {
   id: string;
@@ -15,7 +20,7 @@ export interface WorkSource {
   /** Opaque daemon identity of the owning runtime; not a UUID. */
   daemon_id: string;
   name: string;
-  /** Pinned server-side to "observe" by the current contract. */
+  /** "observe" is read-only; "native" requires dedicated enrollment. */
   mode: string;
   enabled: boolean;
   /** Opaque approved handle; identity, immutable, whitespace-significant. */
@@ -23,6 +28,14 @@ export interface WorkSource {
   config_revision: number;
   last_health?: string;
   last_error?: string;
+  /** Present only for "native" mode sources; omitted by observe-only servers. */
+  native_enrollment_id?: string;
+  /** Unknown/missing server values fall back to "unknown", never "enrolled". */
+  native_enrollment_status?: WorkSourceNativeEnrollmentStatus;
+  native_manifest_hash?: string;
+  native_owner_member_id?: string;
+  native_runtime_created_at?: string;
+  native_enrolled_at?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;

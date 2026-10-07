@@ -121,6 +121,21 @@ func TestSourceReadFrontendContract(t *testing.T) {
 	// receipt whose wire limit_count is absent, not defaulted server-side.
 	defaultListCommandID, defaultListRequestID := prepareTerminal(`{"request_id":"REQUEST","command":"list"}`, string(defaultListResult))
 
+	// Native enrollment leg: prepare one pending and one enrolled source
+	// through the real enrollment routes (intent/token/finalize) using the
+	// fixture-owned runtime and the human owner credential. The manifest
+	// hashes are test-owned opaque values; physical filesystem proof is a
+	// client concern and deliberately not asserted here.
+	pendingRuntime := nativeEnrollFixture(t, fx, testUserID, "mse contract pending runtime", "mse-contract-pending")
+	pendingSourceID, _ := nativeEnrollIntent(t, ctx, pendingRuntime, testToken, uuid.NewString(), "native contract pending")
+
+	enrolledRuntime := nativeEnrollFixture(t, fx, testUserID, "mse contract enrolled runtime", "mse-contract-enrolled")
+	enrolledSourceID, enrolledEnrollmentID := nativeEnrollIntent(t, ctx, enrolledRuntime, testToken, uuid.NewString(), "native contract enrolled")
+	enrolledHash := strings.Repeat("f6", 32)
+	mse := nativeEnrollToken(t, ctx, enrolledRuntime, enrolledSourceID, testToken, enrolledEnrollmentID, 1, enrolledHash)
+	mustSourceReadCall(t, ctx, http.MethodPost, nativeEnrollFinalizePath(enrolledRuntime, enrolledSourceID), mse, testWorkspaceID,
+		nativeEnrollProofBody(enrolledEnrollmentID, 1, enrolledHash), http.StatusOK)
+
 	child := exec.CommandContext(ctx, pnpm, "exec", "vitest", "run", vitestFile, "--reporter=json")
 	child.Dir = coreDir
 	child.Env = append(os.Environ(),
@@ -134,11 +149,14 @@ func TestSourceReadFrontendContract(t *testing.T) {
 		"MULTICA_SOURCE_READ_CONTRACT_READ_COMMAND="+detailCommandID,
 		"MULTICA_SOURCE_READ_CONTRACT_DEFAULT_LIST_COMMAND="+defaultListCommandID,
 		"MULTICA_SOURCE_READ_CONTRACT_DEFAULT_LIST_REQUEST="+defaultListRequestID,
+		"MULTICA_SOURCE_READ_CONTRACT_PENDING_SOURCE_ID="+pendingSourceID,
+		"MULTICA_SOURCE_READ_CONTRACT_ENROLLED_SOURCE_ID="+enrolledSourceID,
+		"MULTICA_SOURCE_READ_CONTRACT_ENROLLED_HASH="+enrolledHash,
 	)
 	out, err := child.CombinedOutput()
 	// Vitest output can embed response bodies from failed expectations; the
 	// auth JWT and the source-read capability token must never reach the log.
-	safe := sanitizeSourceContractOutput(string(out), testToken, msr)
+	safe := sanitizeSourceContractOutput(string(out), testToken, msr, mse)
 	if err != nil {
 		t.Fatalf("core vitest contract run failed: %v\n%s", err, safe)
 	}
@@ -149,14 +167,15 @@ func TestSourceReadFrontendContract(t *testing.T) {
 		NumPendingTests int  `json:"numPendingTests"`
 		NumFailedTests  int  `json:"numFailedTests"`
 	}
-	if json.Unmarshal(out, &summary) != nil || !summary.Success || summary.NumTotalTests != 6 || summary.NumPassedTests != 6 || summary.NumPendingTests != 0 || summary.NumFailedTests != 0 {
-		t.Fatalf("core contract must report exactly six passed tests, no skips or failures\n%s", safe)
+	if json.Unmarshal(out, &summary) != nil || !summary.Success || summary.NumTotalTests != 7 || summary.NumPassedTests != 7 || summary.NumPendingTests != 0 || summary.NumFailedTests != 0 {
+		t.Fatalf("core contract must report exactly seven passed tests, no skips or failures\n%s", safe)
 	}
 }
 
 // sanitizeSourceContractOutput redacts the literal session credentials plus
-// source capability from bounded child output before any failure message.
-func sanitizeSourceContractOutput(out, jwt, msr string) string {
+// source-read and source-enrollment capabilities from bounded child output
+// before any failure message.
+func sanitizeSourceContractOutput(out, jwt string, capabilities ...string) string {
 	redact := func(s, secret string) string {
 		if secret == "" {
 			return s
@@ -164,7 +183,9 @@ func sanitizeSourceContractOutput(out, jwt, msr string) string {
 		return strings.ReplaceAll(s, secret, "[REDACTED]")
 	}
 	out = redact(out, jwt)
-	out = redact(out, msr)
+	for _, capability := range capabilities {
+		out = redact(out, capability)
+	}
 	if len(out) > 8192 {
 		out = out[:8192] + "\n[output truncated]"
 	}

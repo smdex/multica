@@ -34,5 +34,9 @@
   "status_unknown": "The outcome of this read is not known yet.",
   "history_error": "Existing read results could not be loaded.",
   "history_none": "Select a previous read…",
-  "source_disabled_hint": "This source is disabled. New reads are blocked, but existing results remain inspectable."
+  "source_disabled_hint": "This source is disabled. New reads are blocked, but existing results remain inspectable.",
+  "native_status_pending": "Native enrollment: awaiting approval.",
+  "native_status_enrolled": "Native enrollment: enrolled.",
+  "native_status_unavailable": "Native enrollment unavailable.",
+  "native_readonly_note": "Metadata is read-only, and graph execution is unavailable for native sources; enabling requires an approved enrollment."
 }
