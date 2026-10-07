@@ -81,3 +81,8 @@ __pycache__/
 perf-report/
 # The production example is a tracked template; `.env*` above would hide it.
 !apps/mobile/.env.production.example
+
+# Local agent transcripts, scratch notes, and task database
+.pi-subagents/
+.jcode-scratch/
+.todos/
