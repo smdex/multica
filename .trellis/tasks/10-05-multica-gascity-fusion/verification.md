@@ -182,6 +182,20 @@ These are observed read-delivery improvements, not full swarm acceptance. Root 8
 
 Root 753998fimq passed the final selected client/loop suite under `-race` and `go vet ./internal/daemon ./cmd/server`. Known broader daemon baseline failures remain excluded rather than claimed fixed. Temporary debug-only tests were removed. These checks validate read delivery, not durable restart replay or full swarm orchestration.
 
+## Sources explorer acceptance checkpoint, October 7, 17:34 UTC
+
+This is a read-only Sources slice of T10, not graph/session/mail UI or full native swarm completion. Agent-owned browser and visual testing remains prohibited by the user's assignment. The runbook contains the user-owned Web/desktop checklist.
+
+| Requirement | Check and observed result |
+| --- | --- |
+| Canonical result and request identity | Root 857931dpcg passed 30 decoder, 17 Query/scope, and 24 API-client tests, core typecheck and changed-file lint. A default-list omitted-limit regression failed before fixing exact wire identity and the decoder's existing default of 50. Unknown command status becomes a nonterminal `unknown`, never an invented failure. |
+| Real shared client against actual server boundary | Root 449134amaq passed `TestSourceReadFrontendContract` under `-race`: production router and PostgreSQL create/claim/report typed list, detail and omitted-limit receipts, then the actual TypeScript ApiClient and Query pipeline consume them. The gate requires machine-readable Vitest success with exactly six passed tests, no failures or skips. Actual history omits result, opaque revision/native status survive, and identical create retry returns the original terminal receipt. Initial 294587ranx exposed wrong test expectations for canonical empty `updated_at`; expectations were corrected without changing the production decoder. |
+| One explicit creator and conservative recovery | Sources component regressions verify no create on mount, member/admin affordances, exact same-UUID Retry adoption, pending/claimed/unknown busy, GET-error/manual recovery, history failure and expired-command recheck. Root added a regression that failed because stale pending history permanently fenced creation after an accepted terminal detail GET. The cache's scope-checked terminal receipt now supersedes that metadata. |
+| Shared platform wiring | Earlier root 866071iomk passed sidebar and internal-link tests. Root 351570mcbh passed Web and desktop typechecks after running the declared Web MDX generation. Root 536830nv46 passed 16 Sources component tests, views typecheck and changed-view lint. Final disabled-source selection test, exact immutable candidate acceptance and production packaging are still pending at this checkpoint. |
+| Read-only and scope preservation | New list/history guards reject foreign workspace/source rows before Query caching. Source/config-revision changes remount local request pointers. Disabled source selection allows historical results but blocks creation. No source writes, native Start, synthetic Issue, server-payload Zustand state or new dependency is introduced. |
+
+No full frontend/backend/mobile suite or browser visual pass is claimed. The UI's initial worker report overstated disabled-source and stale-history corrections; root inspection and the new regression caught those gaps before publication. The final candidate must pass its actual tests and packaging checks before the fork bookmark moves.
+
 ## Full product acceptance still required
 
 On October 7 at 12:36 UTC the user assigned all browser E2E and visual testing to themselves. Agent verification is limited to code, CLI, unit and integration checks. Provide reproducible environment/setup instructions and a browser acceptance checklist; do not run Playwright or browser-agent testing. User ownership of the visual check does not imply that missing product workflows have been implemented.

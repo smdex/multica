@@ -74,6 +74,11 @@ describe("toInternalAppPath", () => {
 });
 
 describe("openLink", () => {
+  it("keeps a cross-workspace Sources destination in the application", () => {
+    openLink(`${APP_ORIGIN}/other/sources`, "acme", APP_ORIGIN);
+    expect(navigatedPaths()).toEqual(["/other/sources"]);
+    expect(openSpy).not.toHaveBeenCalled();
+  });
   it("navigates in-app for a URL pointing back at this deployment (MUL-5208)", () => {
     openLink(`${APP_ORIGIN}/acme/issues/MUL-1`, "acme", APP_ORIGIN);
     expect(navigatedPaths()).toEqual(["/acme/issues/MUL-1"]);

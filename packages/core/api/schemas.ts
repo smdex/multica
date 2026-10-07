@@ -3990,7 +3990,7 @@ export const WorkSourceCommandSchema = z.object({
   command: z.enum(["read", "list"]),
   native_id: z.string().nullish().transform((v) => v ?? undefined),
   limit_count: z.number().int().nonnegative().nullish().transform((v) => v ?? undefined),
-  status: z.enum(["pending", "claimed", "succeeded", "failed"]),
+  status: z.string().pipe(z.enum(["pending", "claimed", "succeeded", "failed", "unknown"]).catch("unknown")),
   config_revision: z.number().int().nonnegative(),
   expires_at: z.string(),
   claimed_runtime_id: z.string().nullish().transform((v) => v ?? undefined),

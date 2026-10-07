@@ -81,6 +81,22 @@ For an operator-owned manual check:
 
 Polling is serial, one command per runtime per round. Slow sources and unavailable runtimes can delay other targets. Execution is bounded to 30 seconds and the command deadline. Reports are retained only in memory: same-process lost-reply retry is delivered, but a daemon restart loses an unreported outcome and leaves the claimed command to server expiry. Durable restart replay, graph scheduling, mail/handoffs, source explorer/session controls and preferred jj execution remain separate unfinished work. There is no new visual source or swarm page to test yet.
 
+## Milestone 7: shared read-only Sources explorer
+
+Web and desktop share a workspace `Sources` page at `/{workspaceSlug}/sources`, with the normal workspace guard and navigation adapters. It is a read-only inspection slice, not a graph or execution control surface. Opening the page or selecting a source creates no command. Owners/admins can explicitly refresh the first 50 items or read one item. Ordinary members can inspect existing receipt history without invoking the daemon. Disabled sources retain history but cannot accept new reads.
+
+Each explicit read owns a fresh request UUID. Transport-loss Retry reuses the identical body and UUID. Server receipts/results remain in workspace-scoped TanStack Query caches, with exact source/request/command identity checked before use. Pending, claimed and unknown statuses block another request. A passed deadline is not proof of failure: automatic polling stops and Recheck asks the server for the actual outcome. Unknown newer-backend status strings remain unknown rather than becoming a fabricated failure or success. Source, workspace and configuration changes reset only local pointers/intents, not server authority.
+
+List results are bounded to the first 50, not an exhaustive source snapshot. Detail revisions are opaque item revisions, not dependency topology CAS. The explorer adds no source writes, native Start, synthetic Issue, graph, mail or session controller. It does not establish two-project federation or restart replay.
+
+For nonvisual public HTTP/TypeScript contract acceptance in a managed testing checkout:
+
+```bash
+devenv shell -- bash -c 'cd server && MULTICA_RUN_SOURCE_CLIENT_CONTRACT=1 MULTICA_SOURCE_CLIENT_PNPM="$(command -v pnpm)" go test -race ./cmd/server -run "^TestSourceReadFrontendContract$" -count=1 -v'
+```
+
+This gated test prepares receipts through the actual production router and PostgreSQL, then runs the checked-out TypeScript client/decoder against that server. It does not run a browser, discover installed agents, start services or apply migrations. Default frontend tests skip this integration file unless the Go fixture supplies its explicit environment.
+
 ## Get the published milestone
 
 Use a separate clean checkout for periodic testing so ongoing implementation files cannot leak into the test build:
@@ -129,7 +145,16 @@ No browser E2E or visual tests are run by the implementation agent. For these fo
 4. Check narrow windows, long titles, overflow, keyboard navigation and visible error states on these existing screens.
 5. Record the published `main` commit ID, affected route, reproduction steps and screenshots for any regression.
 
-Source/link APIs have handler/database acceptance, but source explorer and graph controls have no delivered visual workflow yet. The future browser checklist will cover source-only work without synthetic Issues, source rename/link/unlink, parallel A/B with gated C, addressed mail/processed receipts, same-session input, Hold/Cancel/restart, permissions and partial outages once those workflows exist. Do not count these future checks as passed or ask the user to test missing controls.
+For milestone 7, also test the shared Sources workflow manually:
+
+1. Configure an approved local binding and intentionally start its daemon as in milestone 6. Open Sources in Web and desktop. Confirm merely opening/selecting a source launches no read, then use Refresh explicitly and inspect a listed item with Read.
+2. Verify an ordinary member can select a completed history receipt but cannot request a new source read. A disabled source must remain selectable for history, with new reads disabled. Sign in with existing accounts, do not reset passwords.
+3. Interrupt the read request response and use Retry. Confirm the same command/request UUID is reused and results become visible. Pending/claimed/unknown commands must prevent a second read. Stop the daemon or make the source unavailable and check the visible failed receipt and generic diagnostic. Do not expose local binding paths or tokens in screenshots.
+4. For a passed deadline or failed receipt fetch, use Recheck. It must show the server's status rather than assume failure. Change workspace/source and verify results cannot bleed across scope. Test source rename/configuration refresh without losing the server receipt history.
+5. Check keyboard labels/focus, long native IDs/titles/revisions, narrow-window wrapping/scrolling and all supported languages (English, Simplified Chinese, Japanese, Korean and French). Desktop Sources must remain a normal workspace tab, not a pre-workspace overlay.
+6. Record the published commit ID, route, account role, observed receipt UUID/status, reproduction steps and screenshots for any regression. Never record bearer credentials.
+
+Graph controls are still undelivered. The future browser checklist will cover source-only execution without synthetic Issues, source rename/link/unlink UI, parallel A/B with gated C, addressed mail/processed receipts, same-session input, Hold/Cancel/restart, permissions and partial outages once those workflows exist. Do not count these future checks as passed or ask the user to test missing controls.
 
 ## Publication boundary
 

@@ -15,7 +15,11 @@ export const workSourceKeys = {
 export function workSourcesOptions(wsId: string) {
   return queryOptions({
     queryKey: workSourceKeys.list(wsId),
-    queryFn: () => api.listWorkSources({ workspaceUuid: wsId }),
+    queryFn: async () => {
+      const sources = await api.listWorkSources({ workspaceUuid: wsId });
+      if (sources.some((source) => source.workspace_id !== wsId)) throw new Error("Source list does not match the workspace");
+      return sources;
+    },
     enabled: !!wsId,
   });
 }
@@ -47,8 +51,11 @@ export const workSourceCommandKeys = {
 export function workSourceCommandsOptions(wsId: string, sourceId: string) {
   return queryOptions({
     queryKey: workSourceCommandKeys.list(wsId, sourceId),
-    queryFn: ({ signal }) =>
-      api.listWorkSourceCommands({ workspaceUuid: wsId, sourceId, signal }),
+    queryFn: async ({ signal }) => {
+      const receipts = await api.listWorkSourceCommands({ workspaceUuid: wsId, sourceId, signal });
+      if (receipts.some((receipt) => receipt.workspace_id !== wsId || receipt.source_id !== sourceId)) throw new Error("Source history does not match the requested scope");
+      return receipts;
+    },
     enabled: !!wsId && !!sourceId,
   });
 }

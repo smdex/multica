@@ -200,7 +200,7 @@ describe("work source command client", () => {
 
   it.each([
     ["command", { ...command, command: "rm-rf" }],
-    ["status", { ...command, status: "executing" }],
+    ["status", { ...command, status: null }],
     ["id", { ...command, id: null }],
     ["request_id", { ...command, request_id: "" }],
   ])("rejects a malformed command response: bad %s", async (_label, body) => {
@@ -209,6 +209,13 @@ describe("work source command client", () => {
     await expect(
       client.getWorkSourceCommand({ workspaceUuid: "ws-1", commandId: "cmd-1" }),
     ).rejects.toThrow(/Malformed response/);
+  });
+
+  it("keeps future string statuses unknown, never fabricating a terminal outcome", async () => {
+    stubFetch({ ...command, status: "executing" });
+    const client = new ApiClient("https://api.example.test");
+    const got = await client.getWorkSourceCommand({ workspaceUuid: "ws-1", commandId: "cmd-1" });
+    expect(got.status).toBe("unknown");
   });
 
   it("rejects a malformed command list instead of faking an empty one", async () => {

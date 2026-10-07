@@ -141,6 +141,7 @@ vi.mock("@multica/core/paths", async (importOriginal) => ({
     myIssues: () => "/acme/my-issues",
     issues: () => "/acme/issues",
     projects: () => "/acme/projects",
+    sources: () => "/acme/sources",
     autopilots: () => "/acme/autopilots",
     agents: () => "/acme/agents",
     squads: () => "/acme/squads",
@@ -390,6 +391,18 @@ describe("workspace-switcher dropdown per-workspace dot", () => {
 });
 
 describe("navigation item presentation", () => {
+  it("links Sources within the workspace and keeps it selected on its route", () => {
+    const previous = navigation.current.pathname;
+    navigation.current.pathname = "/acme/sources";
+    try {
+      const { container } = renderWithI18n(<AppSidebar />);
+      const sources = container.querySelector('button[data-href="/acme/sources"]');
+      expect(sources).not.toBeNull();
+      expect(sources).toHaveAttribute("data-active", "true");
+    } finally {
+      navigation.current.pathname = previous;
+    }
+  });
   it("keeps Analytics and Settings styled like the other nav items", () => {
     const { container } = render(<AppSidebar />);
     const referenceClassName = container.querySelector(

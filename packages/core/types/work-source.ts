@@ -67,7 +67,7 @@ export interface CreateIssueWorkLinkParams {
 /** Read-only allowlisted commands a source's daemon may execute. */
 export type WorkSourceCommandName = "read" | "list";
 
-export type WorkSourceCommandStatus = "pending" | "claimed" | "succeeded" | "failed";
+export type WorkSourceCommandStatus = "pending" | "claimed" | "succeeded" | "failed" | "unknown";
 
 /**
  * A read-only source command receipt. `request_id` is a caller-supplied UUID
