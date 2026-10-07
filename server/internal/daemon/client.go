@@ -95,6 +95,8 @@ func isRuntimeNotFoundError(err error) bool {
 // Client handles HTTP communication with the Multica server daemon API.
 type Client struct {
 	baseURL string
+	// tokenMu guards concurrent public SetToken and request reads.
+	tokenMu sync.RWMutex
 	token   string
 	client  *http.Client
 
@@ -221,11 +223,15 @@ func daemonCommonCapabilities() []string {
 
 // SetToken sets the auth token for authenticated requests.
 func (c *Client) SetToken(token string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
 	c.token = token
 }
 
 // Token returns the current auth token.
 func (c *Client) Token() string {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
 	return c.token
 }
 
@@ -901,8 +907,8 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]WorkspaceInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if tok := c.Token(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	c.setIdentityHeaders(req)
 	if c.workspaceETag != "" {
@@ -1382,8 +1388,8 @@ func (c *Client) postJSONViaObserved(ctx context.Context, httpClient *http.Clien
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if tok := c.Token(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	c.setIdentityHeaders(req)
 
@@ -1409,7 +1415,7 @@ func (c *Client) postJSONViaObserved(ctx context.Context, httpClient *http.Clien
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, respBody any) error {
-	return c.getJSONWithToken(ctx, path, c.token, respBody)
+	return c.getJSONWithToken(ctx, path, c.Token(), respBody)
 }
 
 // getJSONWithToken performs one GET with an explicit credential. It is used by

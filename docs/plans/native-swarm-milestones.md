@@ -65,6 +65,22 @@ devenv shell -- bash -c 'cd server && go test -race ./cmd/server -run "^TestSour
 
 These checks use real HTTP routes and PostgreSQL with test-created credentials. Do not paste returned credentials into logs or screenshots. This slice introduces no migration, token registry, source-write permission or UI. It enables authenticated delivery interfaces, not automatic daemon execution. The local bindings and executor still await polling integration.
 
+## Milestone 6: automatic read-only delivery
+
+This milestone connects the local bindings to the actual daemon lifecycle. It supersedes the earlier milestones' statements that polling integration is missing. An unconfigured daemon performs no source-read HTTP calls or subprocess launches. A configured daemon discovers pending commands only in bound workspaces, claims only exact workspace/handle matches, exchanges short-lived runtime-scoped credentials, and runs the explicitly approved Beads executable. Observe sources still cannot start agents or write source data.
+
+The nonvisual acceptance gate now exercises the production router, PostgreSQL and `Daemon.Run`: list and detail results, a failed source with a generic diagnostic, cancellation/shutdown, and a lost reply after the server commits a report. That last case must retry the identical outcome without a second subprocess. Unit checks additionally cover malformed receipts, expired or divergent claims, unbound handles/workspaces, second-runtime discovery, credential refresh, rate limits and deadline-bounded reporting. Test executables are disposable fixtures, not installed agents or provider accounts.
+
+For an operator-owned manual check:
+
+1. Use the published build in a disposable testing workspace. Authenticate the CLI as the owner of the online runtime. Starting the daemon can also execute ordinary queued agent runs and probe configured agent CLIs, so use only a workspace and executables you intentionally approve.
+2. Create or identify an observe work source through `POST /api/work-sources` with `runtime_id`, `name` and `source_handle`, and optional `project_id`. Use `X-Workspace-ID` with the actual workspace UUID. Keep its runtime identity unchanged.
+3. Save the explicit local binding with the milestone 3 command, then start the selected profile with `multica --profile dev daemon start --foreground`. If already running, restart that profile after saving settings. Bindings load at startup, not dynamically.
+4. As workspace owner/admin, submit `POST /api/work-sources/{sourceID}/commands` with a fresh UUID `request_id` and either `{"command":"list","limit":2}` or `{"command":"read","native_id":"<existing native ID>"}`. Include `request_id` in the same object. Retry only the identical object with the same UUID.
+5. Poll `GET /api/work-source-commands/{commandID}` as a workspace member. Expect `pending` then `claimed` then `succeeded`, with `result` a JSON-encoded string containing a list array or a detail object. Invalid source availability yields `failed` with a generic diagnostic, not local paths or executable stderr. Never copy capability tokens into screenshots or logs.
+
+Polling is serial, one command per runtime per round. Slow sources and unavailable runtimes can delay other targets. Execution is bounded to 30 seconds and the command deadline. Reports are retained only in memory: same-process lost-reply retry is delivered, but a daemon restart loses an unreported outcome and leaves the claimed command to server expiry. Durable restart replay, graph scheduling, mail/handoffs, source explorer/session controls and preferred jj execution remain separate unfinished work. There is no new visual source or swarm page to test yet.
+
 ## Get the published milestone
 
 Use a separate clean checkout for periodic testing so ongoing implementation files cannot leak into the test build:

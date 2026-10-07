@@ -62,7 +62,17 @@ run_checked 'TestSourceReadTokenRoundTripAndExpiry TestSourceReadTokenPurposeKey
 run_checked 'TestSourceReadTokenExchangeOwnership TestSourceReadTokenCommandFlow TestSourceReadTokenScopedToFencedRoutes TestSourceReadTokenInvalidationOnPATRevocation TestSourceReadTokenInvalidationOnMembershipIncarnation TestSourceReadTokenExpiresWhileBlockedOnSourceLock TestSourceReadTokenPATRevocationWinsLockBeforeClaim' \
   go test -race ./cmd/server -run '^TestSourceReadToken' -count=1 -timeout 120s -v
 
+run_checked 'TestSourceReadClientThroughProductionRouter TestSourceReadDaemonDispatchThroughProductionRouter' \
+  go test -race ./cmd/server -run '^TestSourceRead(ClientThroughProductionRouter|DaemonDispatchThroughProductionRouter)$' -count=1 -timeout 120s -v
+run_checked 'TestWorkSourceReadLoopNoBindingsNoRequests TestWorkSourceReadLoopInvalidBindingsFailClosed' \
+  go test -race ./internal/daemon -run '^Test(WorkSourceRead|WorkSourceReadTargets|ExecuteWorkSourceRead|FakeBDWritesMarkerWhenRun|ExchangeSourceReadToken|ListSourceReadCommands|ClaimSourceReadCommand|ReportSourceReadCommand|SourceReadClient|ClientToken)' -count=1 -timeout 120s -v
+
+run_checked 'TestParseWorkSourceReadsValid TestParseWorkSourceReadsRejectsNull TestRunConfigSetWorkSourceReadsProfileIsolation' \
+  go test -race ./internal/cli ./cmd/multica -run WorkSourceReads -count=1 -v
+run_checked 'TestListRejectsWhitespaceOnlyID TestReadTaskRejectsWhitespaceOnlyRevision' \
+  go test -race ./pkg/beads -count=1 -v
+
 run_checked 'TestRuntimeGC_KeepsWorkSourceOwner TestRuntimeGC_KeepsTerminalTaskHistory' \
   go test -race ./cmd/server -run '^TestRuntimeGC' -count=1 -timeout 120s -v
 
-printf '\nReceipt, authenticated source-command transport, source lifecycle and same-session interface foundations verified. Automatic source dispatch and full swarm E2E remain separate acceptance.\n'
+printf '\nReceipt, source lifecycle, scoped automatic read delivery/retry and same-session interface checks passed. Graph scheduling, mail/handoffs, durable restart recovery and full swarm acceptance remain incomplete.\n'
