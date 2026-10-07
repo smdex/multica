@@ -196,6 +196,14 @@ This is a read-only Sources slice of T10, not graph/session/mail UI or full nati
 
 No full frontend/backend/mobile suite or browser visual pass is claimed. The UI's initial worker report overstated disabled-source and stale-history corrections; root inspection and the new regression caught those gaps before publication. The final candidate must pass its actual tests and packaging checks before the fork bookmark moves.
 
+## Published Sources explorer milestone, October 7, 17:59 UTC
+
+Exact immutable candidate `abdcdd445bc376ea73077fac618176af571746d2` passed root 126335bkra from its clean archive: 74 core tests (including three path-consistency cases), 74 shared-view/navigation tests, core/views/Web/desktop typechecks, changed-layer lint, production-router/PostgreSQL-to-TypeScript acceptance under `-race -count=3` with exactly six client tests each time, `go vet ./cmd/server`, and actual Web plus desktop production builds. Web build includes `/{workspaceSlug}/sources`; desktop build produced main/preload/renderer bundles and built its bundled Go CLI. Archive CLI version metadata is `dev`/`unknown` because the export has no Git checkout. Signed installers and visual rendering were not exercised. Initial clean archive attempts found missing cached declared packages and an omitted UI workspace setup; installation was completed from the unchanged frozen lockfile, without dependency or source changes.
+
+Independent read-only Sources review VV6iRygR found no concrete blocker after consuming all required source contracts and tracing both platform routes. Its nonblocking claim that unknown receipts never poll is imprecise: they poll until expiry and have manual recheck afterward. The actual named tests own that behavior. At 17:59 UTC jj fast-forwarded fork `origin/main` from 77659969 to abdcdd44, and independent `ls-remote` confirmed that exact SHA. Unpublished research and task metadata were kept out of the milestone.
+
+This closes the nonvisual feedback loop for the read-only Sources slice, not the complete native swarm. The runbook's user-owned Web/desktop checklist remains unexecuted by the agent. Graph admission, source writes, addressed mail, handoffs, same-session product controls and durable restart replay remain incomplete.
+
 ## Full product acceptance still required
 
 On October 7 at 12:36 UTC the user assigned all browser E2E and visual testing to themselves. Agent verification is limited to code, CLI, unit and integration checks. Provide reproducible environment/setup instructions and a browser acceptance checklist; do not run Playwright or browser-agent testing. User ownership of the visual check does not imply that missing product workflows have been implemented.
