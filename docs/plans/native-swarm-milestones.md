@@ -197,6 +197,10 @@ For milestone 7, also test the shared Sources workflow manually:
 
 Graph controls are still undelivered. The future browser checklist will cover source-only execution without synthetic Issues, source rename/link/unlink UI, parallel A/B with gated C, addressed mail/processed receipts, same-session input, Hold/Cancel/restart, permissions and partial outages once those workflows exist. Do not count these future checks as passed or ask the user to test missing controls.
 
+## Milestone 10: scoped native enrollment authority
+
+[The enrollment authority milestone](native-enrollment-authority.md) records the verified backend routes, exact production-router/PostgreSQL outcomes and reproducible nonvisual checks. The local provisioning CLI and daemon enrollment loop remain under acceptance, not published operational delivery. Enrollment does not initialize Beads or start a graph.
+
 ## Publication boundary
 
 Verified milestones are published with jj to `origin` (`smdex/multica`) on `main`, with a dry-run and fast-forward ancestry check. Unfinished worker files and unrelated local edits stay local. Private agent transcripts are excluded from the published milestone ancestry. The original local history and working copy are preserved.

@@ -2,6 +2,12 @@
 
 Status: implementation in progress. Workspace maps to City, Project maps to Rig. The existing TaskService and daemon remain execution owners. Passing the foundation checks below does not establish completion of T01-T16 or user-visible swarm acceptance.
 
+## Native enrollment authority checkpoint, October 7, 2026
+
+Backend commit `5018e738f771cf5e6f3823d8e5f3528c2afed168` passed immutable archive acceptance in root task `210422adwh`: token tests, all six real router/PostgreSQL enrollment tests under `-race -count=3`, backend vet and server build. Task `391665qpof` passed existing source-read credentials, receipt routes, registration ownership and draft HTTP compatibility plus migration cleanup checks. Required tests ran, not skipped. [The requirement-mapped ledger](../../../docs/plans/native-enrollment-authority.md) records exact HTTP observations and trust limits.
+
+Only reviewed migrations 600 and 601 were applied. Local CLI replay initially failed because it attempted to republish an existing immutable index; the manager is being corrected. Operational CLI plus actual Daemon.Run enrollment remains unaccepted. Task `307993ucg9` passed shared native response tests, minimized read-only Sources component tests, core/views typechecks and changed-file lint. Task `261388qbt0` passed filesystem ownership race tests after a failing URL alias/credential-disclosure regression was corrected. These local/frontend checks are not full graph or operational enrollment acceptance. Browser tests were excluded as requested.
+
 ## Managed environment
 
 Use the process manager already selected by this checkout. This checkout has declared `devenv` services, so inspect them with `devenv processes list` and run commands through `devenv shell --`. Do not run `make up`, reset passwords, or create an assumed database to fix a test connection.

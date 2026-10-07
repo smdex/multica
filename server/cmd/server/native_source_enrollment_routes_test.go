@@ -6,17 +6,15 @@ package main
 // on):
 //
 //	POST /api/daemon/runtimes/{runtimeId}/source-enrollments
-//	     {request_id,name} — fresh human JWT/PAT only
+//	     {request_id,name}, fresh human JWT/PAT only
 //	POST /api/daemon/runtimes/{runtimeId}/source-enrollments/{sourceId}/token
-//	     {enrollment_id,config_revision,manifest_hash} — fresh human JWT/PAT
+//	     {enrollment_id,config_revision,manifest_hash}, fresh human JWT/PAT
 //	POST /api/daemon/runtimes/{runtimeId}/source-enrollments/{sourceId}/finalize
-//	     same proof body — Bearer mse_ ONLY (scope fenced to this exact path)
+//	     same proof body, Bearer mse_ ONLY (scope fenced to this exact path)
 //
-// These tests are the acceptance contract for the (not yet wired) root-owned
-// handlers, middleware, and SQL. Until that lands, they cannot compile beyond
-// vet and are expected to FAIL once runnable: they encode required behavior,
-// not current behavior. Root may adjust the response shapes here after
-// implementation.
+// These tests exercise the production handlers, middleware and SQL through
+// the real router and PostgreSQL. Their negative cases pin the enrollment
+// authority boundary without launching agent work.
 //
 // Policy under test (MVP authority: the same operator must be BOTH current
 // workspace owner/admin AND exact non-NULL runtime owner):
