@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -150,6 +152,13 @@ type CLIConfig struct {
 	// machine). Empty / absent means "discover from PATH and use vendor
 	// defaults" — the historical behavior. See issue #3875.
 	Backends *BackendOverrides `json:"backends,omitempty"`
+
+	// WorkSourceReads is the operator-local, machine-only binding list for
+	// read-only Beads work-source access (see WorkSourceReadBinding). It is
+	// never sent to the server: beads_dir and executable are properties of
+	// this machine, not of the shared workspace. Set via
+	// `config set work_source_reads '<JSON array>'`; an empty value clears it.
+	WorkSourceReads []WorkSourceReadBinding `json:"work_source_reads,omitempty"`
 
 	// ProfileCommandOverrides is a per-machine map of custom runtime
 	// profile_id -> absolute executable path (MUL-3284). A workspace custom
@@ -391,6 +400,100 @@ func SaveCLIConfigForProfile(cfg CLIConfig, profile string) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename config file: %w", err)
+	}
+	return nil
+}
+
+// WorkSourceReadBinding pins one workspace's read-only access to one Beads
+// work source on this machine. Every field is explicit: the daemon never
+// supplies paths or an executable name itself, performs no PATH lookup, and
+// never consults the server for any of these values.
+type WorkSourceReadBinding struct {
+	// WorkspaceID is the canonical workspace UUID (pg format, lowercase).
+	WorkspaceID string `json:"workspace_id"`
+	// SourceHandle is the exact, opaque source handle; used verbatim, never
+	// trimmed (blank is invalid, but no other normalization is applied).
+	SourceHandle string `json:"source_handle"`
+	// BeadsDir is the explicit absolute path to the approved `.beads` source
+	// directory (forwarded as BEADS_DIR; never auto-discovered).
+	BeadsDir string `json:"beads_dir"`
+	// Executable is the explicit absolute path to the bd binary; no PATH
+	// default is ever applied.
+	Executable string `json:"executable"`
+}
+
+var workSourceReadUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// ParseWorkSourceReads validates a raw JSON array of work-source read
+// bindings. It enforces, per binding: canonical lowercase workspace UUID,
+// non-blank source handle (used verbatim, no trimming), and explicit
+// absolute beads_dir and executable paths. Duplicate workspace_id +
+// source_handle pairs are rejected. It returns nil for an empty array.
+// Trailing JSON after the array is rejected (single decode, then EOF).
+func ParseWorkSourceReads(raw string) ([]WorkSourceReadBinding, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var bindings []WorkSourceReadBinding
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&bindings); err != nil {
+		return nil, fmt.Errorf("work_source_reads must be a JSON array of bindings: %w", err)
+	}
+	if bindings == nil {
+		// Covers both a lone null and anything that decodes without an array;
+		// only an explicit array (or empty input above) clears.
+		return nil, fmt.Errorf("work_source_reads must be a JSON array of bindings (got null)")
+	}
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		return nil, fmt.Errorf("work_source_reads must be a single JSON array (trailing data)")
+	}
+	if len(bindings) == 0 {
+		return nil, nil
+	}
+	if err := ValidateWorkSourceReads(bindings); err != nil {
+		return nil, err
+	}
+	return bindings, nil
+}
+
+// ValidateWorkSourceReads enforces the binding contract on already-decoded
+// bindings — including slices that reached the CLI config file by other
+// means (hand-edited file, programmatic save). Executors must call it and
+// fail closed before launching anything.
+func ValidateWorkSourceReads(bindings []WorkSourceReadBinding) error {
+	seen := make(map[string]struct{}, len(bindings))
+	for i, b := range bindings {
+		if !workSourceReadUUID.MatchString(b.WorkspaceID) {
+			return fmt.Errorf("work_source_reads[%d].workspace_id must be a canonical lowercase UUID (got %q)", i, b.WorkspaceID)
+		}
+		if strings.TrimSpace(b.SourceHandle) == "" {
+			return fmt.Errorf("work_source_reads[%d].source_handle must not be blank", i)
+		}
+		if err := requireExplicitAbsPath("beads_dir", b.BeadsDir); err != nil {
+			return fmt.Errorf("work_source_reads[%d]: %w", i, err)
+		}
+		if err := requireExplicitAbsPath("executable", b.Executable); err != nil {
+			return fmt.Errorf("work_source_reads[%d]: %w", i, err)
+		}
+		key := b.WorkspaceID + "\x00" + b.SourceHandle
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("work_source_reads: duplicate binding for workspace %s handle %q", b.WorkspaceID, b.SourceHandle)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+// requireExplicitAbsPath enforces a non-empty, explicitly absolute path with
+// no implicit resolution, so the daemon executes exactly what the operator
+// wrote. A relative or blank value is rejected rather than defaulted.
+func requireExplicitAbsPath(field, value string) error {
+	if value == "" {
+		return fmt.Errorf("%s must be an explicit absolute path (got empty)", field)
+	}
+	if !filepath.IsAbs(value) {
+		return fmt.Errorf("%s must be an explicit absolute path (got %q)", field, value)
 	}
 	return nil
 }

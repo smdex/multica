@@ -45,6 +45,7 @@ var configSetSupportedKeys = []string{
 	"disable_auto_update",
 	"auto_update_check_interval",
 	"disable_auto_reload",
+	"work_source_reads",
 }
 
 var configSetCmd = &cobra.Command{
@@ -55,7 +56,10 @@ var configSetCmd = &cobra.Command{
 		"device_name, runtime_name, workspaces_root, max_concurrent_tasks, poll_interval, ws_claim_poll_interval, " +
 		"heartbeat_interval, agent_timeout, " +
 		"codex_semantic_inactivity_timeout, codex_handshake_timeout, " +
-		"disable_auto_update, auto_update_check_interval, disable_auto_reload.\n\n" +
+		"disable_auto_update, auto_update_check_interval, disable_auto_reload, work_source_reads.\n\n" +
+		"work_source_reads takes a JSON array of " +
+		"{workspace_id, source_handle, beads_dir, executable} bindings (or \"\" to clear); " +
+		"paths must be explicit absolute paths and are local-only.\n\n" +
 		"The daemon keys (device_name, runtime_name, workspaces_root, max_concurrent_tasks, " +
 		"poll_interval, ws_claim_poll_interval, heartbeat_interval, agent_timeout, " +
 		"codex_semantic_inactivity_timeout, codex_handshake_timeout, " +
@@ -111,7 +115,19 @@ func runConfigShow(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(os.Stdout, "%-34s %t\n", "disable_auto_update:", cfg.DisableAutoUpdate)
 	fmt.Fprintf(os.Stdout, "%-34s %s\n", "auto_update_check_interval:", valueOrDefault(cfg.AutoUpdateCheckInterval, "(not set)"))
 	fmt.Fprintf(os.Stdout, "%-34s %t\n", "disable_auto_reload:", cfg.DisableAutoReload)
+	fmt.Fprintf(os.Stdout, "%-34s %s\n", "work_source_reads:", workSourceReadsDisplay(cfg.WorkSourceReads))
 	return nil
+}
+
+func workSourceReadsDisplay(bindings []cli.WorkSourceReadBinding) string {
+	if len(bindings) == 0 {
+		return "(not set)"
+	}
+	parts := make([]string, len(bindings))
+	for i, b := range bindings {
+		parts[i] = b.WorkspaceID + ":" + b.SourceHandle
+	}
+	return strings.Join(parts, ", ")
 }
 
 func runConfigSet(cmd *cobra.Command, args []string) error {
@@ -254,6 +270,12 @@ func applyConfigSet(cfg *cli.CLIConfig, key, value string) error {
 		if err := assignBool(&cfg.DisableAutoReload, key, value); err != nil {
 			return err
 		}
+	case "work_source_reads":
+		bindings, err := cli.ParseWorkSourceReads(value)
+		if err != nil {
+			return err
+		}
+		cfg.WorkSourceReads = bindings
 	default:
 		return fmt.Errorf("unknown config key %q (supported: %s)", key, joinKeys(configSetSupportedKeys))
 	}

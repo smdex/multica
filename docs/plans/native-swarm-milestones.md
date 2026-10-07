@@ -17,7 +17,21 @@ The read-only receipt API now supports stable request UUIDs, exact owning-daemon
 | `GET /api/work-source-commands/{commandID}` | Workspace member reads the complete scoped receipt. |
 | Daemon claim/result routes | Require an actual `mdt_` credential matching the bound daemon, not a user JWT/PAT or a claimed daemon ID header. |
 
-**Automatic source reads are not delivered yet.** Daemon-local approved handle mapping, pending-command dispatch and daemon credential bootstrap remain next steps. Creating a receipt does not execute `bd`: unclaimed reads expire to a visible failed receipt. The HTTP regression uses a test-owned daemon credential and typed test result, not a real source executor. Observe-mode sources cannot start agents or write Beads data. There is still no new source explorer or swarm UI to visually test.
+**Automatic source reads are not delivered yet.** Pending discovery is available through `GET /api/daemon/runtimes/{runtimeId}/work-source-commands`, with exact daemon identity and current runtime/source/revision/deadline fences. Discovery does not claim or execute a command. Credential bootstrap and automatic dispatch remain next steps, so unclaimed reads expire to a visible failed receipt. The HTTP regression uses a test-owned daemon credential and typed test result, not a real source executor. Observe-mode sources cannot start agents or write Beads data. There is still no new source explorer or swarm UI to visually test.
+
+## Milestone 3: local read bindings
+
+The CLI accepts an operator-local `work_source_reads` binding list. Each entry pins a workspace UUID and exact source handle to an explicit absolute Beads directory and executable path. It is profile-scoped and never sent to the server. Unknown fields, duplicate bindings, relative paths, `null`, and trailing JSON are rejected before saving. Empty input or `[]` clears the list.
+
+```bash
+multica --profile dev config set work_source_reads '[{"workspace_id":"<workspace UUID>","source_handle":"<exact source handle>","beads_dir":"/absolute/path/to/.beads","executable":"/absolute/path/to/bd"}]'
+multica --profile dev config show
+multica --profile dev config set work_source_reads ''
+```
+
+Replace the placeholders with your actual binding. Use the existing `--profile` flag for profile isolation, not `MULTICA_PROFILE`. `config show` displays workspace/handle identities without printing executable or directory paths.
+
+The daemon-side read helper uses only these local bindings, permits list/read, runs the approved executable without a shell or PATH lookup, and bounds typed results. It is not connected to a polling loop yet. These settings do not start a process, activate automatic reads, or add UI controls. Tests use test-created executables, not your installed Beads CLI or agent accounts.
 
 ## Get the published milestone
 

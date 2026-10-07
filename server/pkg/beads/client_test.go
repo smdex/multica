@@ -304,3 +304,36 @@ func TestExecutionIsArgvOnly(t *testing.T) {
 // TestMain intentionally does not stub PATH or exec.LookPath: every
 // fixture passes an absolute test-created executable, so a user-installed
 // bd can never be resolved by these tests.
+
+func TestListRejectsWhitespaceOnlyID(t *testing.T) {
+	c := fake(t, `printf '[{"id":"  ","title":"A","status":"open","priority":2,"issue_type":"task","created_at":"t","updated_at":"t","dependency_count":0,"dependent_count":0,"comment_count":0}]'`)
+	if _, err := c.List(context.Background(), 10); err == nil {
+		t.Fatal("whitespace-only id must be rejected, matching the receipt service's TrimSpace check")
+	}
+	// Preserve opaque non-blank bytes: surrounding spaces inside a nonblank ID
+	// are data, not blankness.
+	c2 := fake(t, `printf '[{"id":" bd-1 ","title":"A","status":"open","priority":2,"issue_type":"task","created_at":"t","updated_at":"t","dependency_count":0,"dependent_count":0,"comment_count":0}]'`)
+	rows, err := c2.List(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].ID != " bd-1 " {
+		t.Fatalf("opaque id must be preserved verbatim, got %q", rows[0].ID)
+	}
+}
+
+func TestReadTaskRejectsWhitespaceOnlyRevision(t *testing.T) {
+	c := fake(t, `printf '[{"id":"bd-9","title":"A","status":"open","priority":2,"issue_type":"task","created_at":"t","updated_at":"t","dependency_count":0,"dependent_count":0,"comment_count":0,"revision":"  "}]'`)
+	if _, err := c.ReadTask(context.Background(), "bd-9"); err == nil {
+		t.Fatal("whitespace-only revision must be rejected, matching the receipt service's TrimSpace check")
+	}
+	// Nonblank revision preserved verbatim (opaque bytes).
+	c2 := fake(t, `printf '[{"id":"bd-9","title":"A","status":"open","priority":2,"issue_type":"task","created_at":"t","updated_at":"t","dependency_count":0,"dependent_count":0,"comment_count":0,"revision":" r1 "}]'`)
+	issue, err := c2.ReadTask(context.Background(), "bd-9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue.Revision != " r1 " {
+		t.Fatalf("opaque revision must be preserved verbatim, got %q", issue.Revision)
+	}
+}

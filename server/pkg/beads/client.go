@@ -96,7 +96,7 @@ func (c *Client) List(ctx context.Context, limit int) ([]IssueSummary, error) {
 	// must fail closed instead of populating a wrong scoped work card.
 	seen := make(map[string]struct{}, len(rows))
 	for _, row := range rows {
-		if row.ID == "" {
+		if strings.TrimSpace(row.ID) == "" {
 			return nil, fmt.Errorf("beads list: row with missing id")
 		}
 		if _, dup := seen[row.ID]; dup {
@@ -123,7 +123,7 @@ func (c *Client) ReadTask(ctx context.Context, nativeID string) (Issue, error) {
 		if rows[0].ID != nativeID {
 			return Issue{}, fmt.Errorf("beads: show %q returned id %q", nativeID, rows[0].ID)
 		}
-		if rows[0].Revision == "" {
+		if strings.TrimSpace(rows[0].Revision) == "" {
 			return Issue{}, fmt.Errorf("beads: show %q returned no revision", nativeID)
 		}
 		return rows[0], nil

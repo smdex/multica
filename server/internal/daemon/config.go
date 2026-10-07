@@ -165,6 +165,13 @@ type Config struct {
 	// prefers a matching, executable override over resolving the profile's
 	// command_name on PATH. nil/empty means "always resolve via PATH".
 	ProfileCommandOverrides map[string]string
+
+	// WorkSourceReads carries the operator-local read-only Beads bindings
+	// (cli.WorkSourceReadBinding) loaded from the CLI config. Copied, never
+	// aliased, from the loaded CLIConfig slice so later mutation of the
+	// config file cannot change daemon state mid-run. The server never
+	// supplies any of these values.
+	WorkSourceReads []cli.WorkSourceReadBinding
 }
 
 // Overrides allows CLI flags to override environment variables and defaults.
@@ -240,6 +247,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	// purely from env-var configuration. We log a warning and proceed with
 	// no overrides.
 	var profileCommandOverrides map[string]string
+	var workSourceReads []cli.WorkSourceReadBinding
 	if cliCfg, err := cli.LoadCLIConfigForProfile(overrides.Profile); err != nil {
 		slog.Warn("could not load CLI config for backend overrides; proceeding without",
 			"profile", overrides.Profile, "err", err)
@@ -258,6 +266,12 @@ func LoadConfig(overrides Overrides) (Config, error) {
 				}
 				profileCommandOverrides[id] = path
 			}
+		}
+		// Operator-local read-only Beads bindings: deep-copy so the daemon
+		// owns its slice and an empty list normalizes to nil.
+		if len(cliCfg.WorkSourceReads) > 0 {
+			workSourceReads = make([]cli.WorkSourceReadBinding, len(cliCfg.WorkSourceReads))
+			copy(workSourceReads, cliCfg.WorkSourceReads)
 		}
 	}
 
@@ -668,6 +682,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		QwenArgs:                        qwenArgs,
 		QwenpawArgs:                     qwenpawArgs,
 		ProfileCommandOverrides:         profileCommandOverrides,
+		WorkSourceReads:                 workSourceReads,
 	}, nil
 }
 
