@@ -117,6 +117,27 @@ devenv shell -- bash -c 'cd server && go test -race ./cmd/server -run "^Test(Sou
 
 Browser/visual testing remains user-owned. No new graph controls are available. Full graph orchestration, addressed mail/handoffs, product session controls, durable restart replay and preferred jj execution remain unfinished.
 
+## Milestone 9: nonexecuting receipt-derived drafts
+
+Published code `a725d71ed866ffb3cda2d8dcd21834548d117c8b` includes the draft feature `1a1e78ab23133080e3e093b943f7f81aecb3064a` and concurrent-index retry recovery. Owners/admins can create a frozen graph through `POST /api/workflow-runs`; workspace members can retrieve it through `GET /api/workflow-runs/{id}`. See [workflow-drafts.md](workflow-drafts.md) for the exact request, limits, error policy and cleanup semantics. There is no graph page, Start button or agent execution in this milestone.
+
+The corrected immutable archive passed shared client tests/typecheck/lint, graph and source service checks, Beads/daemon/CLI/config/handler race checks, concurrent migration contract checks, public-router/PostgreSQL draft/receipt/registration suites three times, the actual TypeScript client bridge three times, and approved actual Beads/daemon qualification three times. Both CLI and server built, vet passed and CLI help ran. The first archive attempt failed because new concurrent indexes lacked retry cleanup registration; the correction was verified before publication. Earlier frontend packaging remains the separate milestone 7 result, not a new draft UI build.
+
+On a clean published testing checkout, apply reviewed migrations 597 through 599 with that checkout's managed connection as described below. Do not apply unrelated pending migrations from an implementation tree. Then run:
+
+```bash
+devenv shell -- bash -c 'cd server && go test -race ./internal/service -run DraftGraph -count=1'
+devenv shell -- bash -c 'cd server && go test ./cmd/migrate -run "^Test(EveryConcurrentUpBuildHasCleanup|EveryConcurrentDownBuildHasCleanup|ConcurrentIndexCleanupsMatchTheirMigrations)$" -count=1'
+devenv shell -- bash -c 'cd server && go test -race ./cmd/server -run "^TestWorkflowDraft" -count=3 -v'
+devenv shell -- bash -c 'cd server && MULTICA_RUN_DRAFT_CLIENT_CONTRACT=1 MULTICA_SOURCE_CLIENT_PNPM="$(command -v pnpm)" go test -race ./cmd/server -run "^TestWorkflowDraftFrontendContract$" -count=3 -v'
+```
+
+The broad draft command skips the explicitly gated actual-Beads/client tests unless their qualification environment is supplied. The explicit client command above requires three passed client cases per iteration, with no skips. Default public-router tests use disposable fixtures and test-created executables, not installed agents. Actual Beads qualification requires the separate opt-in setup in [qualified-dependency-reads.md](qualified-dependency-reads.md), never automatic discovery.
+
+For a manual API check, use succeeded complete detail receipts from the same source/configuration for the root and every reachable predecessor, then submit the documented request as an owner/admin. Expect 201 and a frozen `draft`; repeat with the same request UUID and reordered receipt IDs for 200 on the same run UUID. Changing capacity with that UUID must return 409. A member can GET the frozen graph but cannot create it. Do not use a real user source for deletion tests. A saved draft does not start workers, create Issues or write Beads data.
+
+Browser/visual checks remain user-owned: repeat milestone 7's Sources checks and existing workspace/Issue/chat navigation on the published revision. Do not look for absent graph controls. Full parallel admission, joins, mail/handoffs, product session controls, durable restart replay and preferred jj execution remain unfinished.
+
 ## Get the published milestone
 
 Use a separate clean checkout for periodic testing so ongoing implementation files cannot leak into the test build:
