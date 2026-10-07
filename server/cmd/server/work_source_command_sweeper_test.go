@@ -4,10 +4,35 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+func TestExpiredWorkSourceSelectionSkipsOrphans(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+	fx := testutil.New(testPool, testWorkspaceID, testUserID)
+	orphanSource := uuid.NewString()
+	fx.Insert(t, "work_source_command", testutil.Cols{
+		"id": testutil.Raw("gen_random_uuid()"), "workspace_id": testWorkspaceID,
+		"source_id": orphanSource, "request_id": uuid.NewString(),
+		"config_revision": 1, "command": "list", "status": "pending",
+		"request_hash": "orphan-expiry-regression", "expires_at": testutil.Raw("'-infinity'::timestamptz"),
+	})
+	rows, err := db.New(testPool).ListExpiredWorkSourceCommandSources(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if fx.Count(t, `SELECT count(*) FROM work_source WHERE id=$1 AND workspace_id=$2`, row.SourceID, row.WorkspaceID) != 1 {
+			t.Fatal("orphaned expired receipt consumed bounded sweeper selection")
+		}
+	}
+}
 
 func TestSweepExpiredWorkSourceCommands(t *testing.T) {
 	if testPool == nil {

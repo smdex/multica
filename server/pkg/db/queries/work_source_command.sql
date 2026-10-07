@@ -40,9 +40,10 @@ WHERE source_id = $1 AND workspace_id = $2 AND status IN ('pending', 'claimed') 
 
 -- name: ListExpiredWorkSourceCommandSources :many
 -- Root sweeper locks each source before calling ExpireWorkSourceCommandsForSource.
-SELECT source_id, workspace_id FROM work_source_command
-WHERE status IN ('pending', 'claimed') AND expires_at <= statement_timestamp()
-ORDER BY expires_at, id LIMIT $1;
+SELECT c.source_id, c.workspace_id FROM work_source_command c
+WHERE c.status IN ('pending', 'claimed') AND c.expires_at <= statement_timestamp()
+  AND EXISTS (SELECT 1 FROM work_source s WHERE s.id = c.source_id AND s.workspace_id = c.workspace_id)
+ORDER BY c.expires_at, c.id LIMIT $1;
 
 -- name: ClaimWorkSourceCommand :one
 -- CAS pending -> claimed by exactly one runtime; a stale or concurrent
