@@ -23,7 +23,10 @@ UPDATE agent_task_queue t
 SET status = 'running',
     started_at = now(),
     wait_reason = NULL,
-    prepare_lease_expires_at = NULL
+    prepare_lease_expires_at = NULL,
+    active_run_id = sqlc.narg(active_run_id)::uuid,
+    control_state = NULL,
+    control_updated_at = NULL
 FROM candidate
 WHERE t.id = candidate.id
   -- Reference the data-modifying CTE explicitly: capability persistence and

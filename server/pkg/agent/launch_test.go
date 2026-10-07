@@ -289,7 +289,7 @@ func TestBackendFactoriesSetCommandLogProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRuntime(omp): %v", err)
 	}
-	if got := omp.(*piBackend).cfg.provider; got != "omp" {
+	if got := omp.(*ompBackend).delegate.cfg.provider; got != "omp" {
 		t.Fatalf("omp log provider = %q, want omp", got)
 	}
 }
@@ -380,7 +380,7 @@ func TestBuiltinRuntimeIdentitiesFilterLaunchPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveBackend(omp): %v", err)
 	}
-	got := backend.(*piBackend).cfg.LaunchPrefix
+	got := backend.(*ompBackend).delegate.cfg.LaunchPrefix
 	if strings.Join(got, "\x00") != "start\x00q36" {
 		t.Fatalf("runtime identity did not inherit prefix filtering: %v", got)
 	}

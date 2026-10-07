@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"log/slog"
+	"sort"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -65,12 +66,25 @@ func (h *Handler) revokeAndRemoveMember(ctx context.Context, workspaceID, userID
 		return empty, err
 	}
 
+	if _, err := qtx.LockWorkspaceForChatSessionCreate(ctx, workspaceID); err != nil {
+		return empty, err
+	}
+
 	runtimes, err := qtx.ListAgentRuntimesByOwner(ctx, db.ListAgentRuntimesByOwnerParams{
 		WorkspaceID: workspaceID,
 		OwnerID:     userID,
 	})
 	if err != nil {
 		return empty, err
+	}
+
+	// Workflow dispatch holds runtime before agent/task rows. Revoke in the
+	// same order so a current-access check cannot deadlock with force-offline.
+	sort.Slice(runtimes, func(i, j int) bool { return uuidToString(runtimes[i].ID) < uuidToString(runtimes[j].ID) })
+	for _, runtime := range runtimes {
+		if _, err := qtx.LockAgentRuntime(ctx, runtime.ID); err != nil {
+			return empty, err
+		}
 	}
 
 	result := revocationResult{Runtimes: runtimes}

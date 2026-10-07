@@ -275,7 +275,8 @@ var (
 	// listModels is an indirection over agent.ListModels so model-discovery
 	// tests can assert which executable path the daemon enumerates without
 	// shelling out to a real CLI. Mirrors the detectAgentVersion hook above.
-	listModels = agent.ListModels
+	listModels    = agent.ListModels
+	refreshModels = agent.RefreshModels
 
 	// lookPath is an indirection over exec.LookPath so registration tests can
 	// resolve custom runtime-profile commands without manipulating the
@@ -399,6 +400,15 @@ type Daemon struct {
 	terminalReportNow    func() time.Time
 	terminalReportMu     sync.Mutex
 	terminalReportFlight map[string]struct{}
+
+	// workflowReports persists terminal workflow-command outcomes until the
+	// server acknowledges them. workflowRuns is the process-local fence around
+	// live provider Sessions; no command can locate a session by task history.
+	workflowReports      *workflowReportStore
+	workflowReportWakeup chan struct{}
+	workflowMu           sync.RWMutex
+	workflowRuns         map[string]*workflowRun
+	workflowDispatches   map[string]struct{}
 
 	mu           sync.Mutex
 	workspaces   map[string]*workspaceState
@@ -720,6 +730,10 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 		terminalReportWakeup:        make(chan struct{}, 1),
 		terminalReportNow:           time.Now,
 		terminalReportFlight:        make(map[string]struct{}),
+		workflowReports:             newWorkflowReportStore(cfg),
+		workflowReportWakeup:        make(chan struct{}, 1),
+		workflowRuns:                make(map[string]*workflowRun),
+		workflowDispatches:          make(map[string]struct{}),
 		workspaces:                  make(map[string]*workspaceState),
 		runtimeIndex:                make(map[string]Runtime),
 		profileLaunchSpecs:          make(map[string]profileLaunchSpec),
@@ -2159,6 +2173,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// Start workspace sync loop to discover newly created workspaces.
 	go d.workspaceSyncLoop(ctx)
 	go d.terminalReportReplayLoop(ctx)
+	go d.workflowReportReplayLoop(ctx)
 
 	// Discover agent CLIs installed after startup (MUL-5439). Separate from the
 	// workspace sync loop because that one runs on a thirty-minute consistency
@@ -4533,7 +4548,7 @@ func (d *Daemon) runHeartbeatTick(ctx context.Context, rid string) bool {
 		return false
 	}
 	d.logger.Debug("heartbeat: HTTP tick", "runtime_id", rid)
-	resp, err := d.client.SendHeartbeat(ctx, rid)
+	resp, err := d.client.SendHeartbeat(ctx, rid, d.agentWorkflowCapabilities(rid))
 	if err != nil {
 		if ctx.Err() == nil {
 			if isRuntimeNotFoundError(err) {
@@ -4589,6 +4604,10 @@ func (d *Daemon) handleHeartbeatActions(ctx context.Context, runtimeID string, r
 		if rt := d.findRuntime(runtimeID); rt != nil {
 			go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID)
 		}
+	}
+	if len(resp.PendingAgentWorkflow) > 0 {
+		d.logger.Debug("heartbeat: pending agent workflow commands", "runtime_id", runtimeID, "count", len(resp.PendingAgentWorkflow))
+		d.handleAgentWorkflowCommands(ctx, runtimeID, resp)
 	}
 	// Prefer the batch field (new backend); fall back to singular (old backend).
 	if len(resp.PendingLocalSkillImports) > 0 {
@@ -4678,7 +4697,7 @@ func (d *Daemon) handlePendingWorkHint(runtimeID, kind string) {
 		return
 	}
 	hbCtx, cancel := context.WithTimeout(ctx, pendingWorkHeartbeatTimeout)
-	resp, err := d.client.SendHeartbeat(hbCtx, runtimeID)
+	resp, err := d.client.SendHeartbeat(hbCtx, runtimeID, d.agentWorkflowCapabilities(runtimeID))
 	cancel()
 	if err != nil {
 		if isRuntimeNotFoundError(err) {
@@ -4744,7 +4763,9 @@ func (d *Daemon) handleModelList(ctx context.Context, rt Runtime, requestID stri
 		return
 	}
 
-	catalog, err := listModels(ctx, rt.Provider, agent.NewCommand(execPath, fixedArgs))
+	// The server already handles cached picker reads. Every queued request
+	// must probe live, including force=true and background revalidation.
+	catalog, err := refreshModels(ctx, rt.Provider, agent.NewCommand(execPath, fixedArgs))
 	if err != nil {
 		d.reportModelListResult(ctx, rt, requestID, map[string]any{
 			"status": "failed",
@@ -5837,6 +5858,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	go func() {
 		select {
 		case <-cancelledByPoll:
+			d.cancelWorkflowRun(task.ID)
 			runCancel()
 		case <-runCtx.Done():
 		}
@@ -6577,6 +6599,9 @@ func gateResumeToReachableSession(task *Task, taskCtx *execenv.TaskContextForEnv
 	var reachable bool
 	if providerUsesPiSessionFile(provider) {
 		reachable = piSessionResumable(task.PriorSessionID, refusesMissingSessionCwd)
+		if task.ResumePolicy == "require_native" {
+			reachable = reachable && task.PriorWorkDir != "" && sameExistingDir(envWorkDir, task.PriorWorkDir)
+		}
 	} else {
 		// Compare the directories, not the spelling. Reuse runs in the canonical
 		// path it validated and locked, which need not be character-identical to
@@ -7670,6 +7695,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if err := validateTaskIdentity(task); err != nil {
 		return TaskResult{}, err
 	}
+	if err := validateWorkflowTaskPolicy(&task); err != nil {
+		return TaskResult{}, err
+	}
+	if task.InteractionMode == "chat" && !d.supportsWorkflowChat(task.RuntimeID) {
+		return TaskResult{}, fmt.Errorf("chat interaction mode is unsupported by runtime %s", task.RuntimeID)
+	}
 
 	// Refuse to spawn an agent without a workspace. An empty workspace_id
 	// here would make MULTICA_WORKSPACE_ID empty in the agent env, and the
@@ -7868,6 +7899,40 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// LocalWorkDir into execenv. handleTask already validated + locked the
 	// path for worker tasks; leader tasks intentionally skip the assignment.
 	localAssignment, _ := localDirectoryAssignmentForTask(task, d.cfg.DaemonID)
+	nativeResumeCwd := ""
+	nativeCodexSourceHome := ""
+	var nativeImport nativeImportContext
+	if task.ResumePolicy == "require_native" {
+		loadedNativeImport, err := d.loadNativeImportContext(task.RuntimeID, task.PriorSessionID)
+		if err != nil {
+			return TaskResult{}, fmt.Errorf("required native import is not available on this daemon: %w", err)
+		}
+		nativeImport = loadedNativeImport
+		if err := validateNativeImportTaskBinding(task, nativeImport); err != nil {
+			return TaskResult{}, err
+		}
+		if task.PriorWorkDir == "" || !sameExistingDir(task.PriorWorkDir, nativeImport.ResumeCwd) {
+			return TaskResult{}, errors.New("required native import working directory no longer matches the validated source")
+		}
+		if localAssignment != nil {
+			return TaskResult{}, errors.New("required native import cannot replace a project local-directory assignment")
+		}
+		if provider == "codex" {
+			if strings.TrimSpace(nativeImport.ProviderHome) == "" {
+				return TaskResult{}, errors.New("required native import has no canonical Codex provider home")
+			}
+			nativeCodexSourceHome = nativeImport.ProviderHome
+		}
+		// The native history's cwd is part of its provider resume contract. The
+		// owned fork lives in provider storage; the task's private preparation
+		// directory is never an execution target.
+		nativeResumeCwd = nativeImport.ResumeCwd
+		releaseNativeCwd, err := d.acquireNativeResumeCwdLock(ctx, task.ID, nativeResumeCwd)
+		if err != nil {
+			return TaskResult{}, fmt.Errorf("acquire required native import working directory: %w", err)
+		}
+		defer releaseNativeCwd()
+	}
 	// Reuse intentionally skipped for local_directory tasks: the prior
 	// WorkDir is the user's own path (always present) but the reuse path
 	// loses the envRoot association the GC loop needs, and re-running
@@ -8062,7 +8127,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// store's stale (pre-remount) mtime cannot reclaim it out from under a resume
 	// of a long-idle issue (MUL-4424). No-op for non-Codex tasks / no stable key.
 	if provider == "codex" {
-		if store := execenv.CodexSessionStorePath(d.cfg.Profile, taskCtx); store != "" {
+		if store := execenv.CodexSessionStorePathForHome(nativeCodexSourceHome, d.cfg.Profile, taskCtx); store != "" {
 			d.markActiveStore(store)
 			defer d.unmarkActiveStore(store)
 		}
@@ -8094,6 +8159,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			WorkDir:               priorWorkDir,
 			Provider:              provider,
 			CodexVersion:          codexVersion,
+			CodexSourceHome:       nativeCodexSourceHome,
 			ResumeSessionID:       task.PriorSessionID,
 			OpenclawBin:           openclawBin,
 			McpConfig:             effectiveMcpConfig,
@@ -8145,6 +8211,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			EnvRootPreclaimed:     true,
 			Provider:              provider,
 			CodexVersion:          codexVersion,
+			CodexSourceHome:       nativeCodexSourceHome,
+			ResumeSessionID:       task.PriorSessionID,
 			OpenclawBin:           openclawBin,
 			McpConfig:             effectiveMcpConfig,
 			CursorMcpAuthSource:   cursorMcpAuthSource,
@@ -8226,7 +8294,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("prepare execution environment: %w", err))
 			}
 		} else {
-			if localAssignment != nil {
+			if nativeResumeCwd != "" {
+				prepParams.LocalWorkDir = nativeResumeCwd
+			} else if localAssignment != nil {
 				prepParams.LocalWorkDir = localAssignment.AbsPath
 			}
 			env, err = d.prepareExecutionEnvironment(prepareCtx, prepParams)
@@ -8393,6 +8463,14 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// other errors use its existing FailTask + taskfailure.Classify path with the same
 	// "start task failed: <…>" string and the same failure_reason
 	// taxonomy as before — see MUL-2946 for the classifier contract.
+	// One execution identity is shared by the start acknowledgement, local
+	// controls and interaction reports, including response-loss start retries.
+	task.WorkflowRunID = newWorkflowRunID()
+	workflowRun := d.registerWorkflowRun(task, task.WorkflowRunID)
+	if workflowRun != nil {
+		defer d.unregisterWorkflowRun(workflowRun)
+		ctx = withWorkflowRun(ctx, workflowRun)
+	}
 	var taskCapabilities []string
 	if agent.SupportsTaskSupplement(provider, resolvedVersion) && task.IssueID != "" {
 		taskCapabilities = append(taskCapabilities, protocol.DaemonCapabilityTaskSupplementV1)
@@ -8432,6 +8510,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// conversation Codex will silently restart from scratch.
 	if resumeReachable {
 		gateCodexResumeToRolloutPresence(&task, &taskCtx, provider, env.CodexHome, taskLog)
+	}
+	if task.ResumePolicy == "require_native" && task.PriorSessionID == "" {
+		return TaskResult{}, errors.New("required native session is not reachable in this execution environment")
 	}
 
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
@@ -8679,6 +8760,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		TurnInterruptTimeout:       d.cfg.CodexTurnInterruptTimeout,
 		ThreadHandshakeTimeout:     d.cfg.CodexThreadHandshakeTimeout,
 		ResumeSessionID:            task.PriorSessionID,
+		InteractionMode:            task.InteractionMode,
+		ResumePolicy:               task.ResumePolicy,
 		// Post-gate intent: PriorSessionID here already reflects the pre-flight
 		// resume gates (a dropped resume is surfaced via the prompt instead). If it
 		// survived to here, the backend must disclose the loss when the live
@@ -8725,6 +8808,14 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// context and bloats every turn.
 	if providerNeedsInlineSystemPrompt(provider) {
 		execOpts.SystemPrompt = runtimeBrief
+	}
+	if task.ResumePolicy == "require_native" {
+		verifyCtx, verifyCancel := context.WithTimeout(ctx, workflowListTimeout)
+		err := verifyNativeImportRevision(verifyCtx, backend, nativeImport)
+		verifyCancel()
+		if err != nil {
+			return TaskResult{}, fmt.Errorf("required native session was changed outside this daemon: %w", err)
+		}
 	}
 
 	// A quick-actions refresh task from a server that predates server-side
@@ -8776,6 +8867,18 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if err != nil {
 		return TaskResult{}, err
 	}
+	if task.ResumePolicy == "require_native" {
+		// The result has crossed the provider's terminal boundary, so this is
+		// the only safe time to accept the provider's new revision as our own
+		// append. The durable record lets the next daemon process distinguish it
+		// from an external write before another strict turn starts.
+		refreshCtx, refreshCancel := context.WithTimeout(context.WithoutCancel(ctx), workflowListTimeout)
+		err := d.refreshNativeImportRevision(refreshCtx, backend, nativeImport)
+		refreshCancel()
+		if err != nil {
+			return TaskResult{}, fmt.Errorf("record required native session revision: %w", err)
+		}
+	}
 
 	// retiredSessionID is the session this run was told to resume and then
 	// abandoned. Captured before the retry clears task.PriorSessionID, and
@@ -8786,7 +8889,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	var retiredSessionID string
 	defer func() { taskResult.RetiredSessionID = retiredSessionID }()
 
-	if shouldRetryWithFreshSession(result, task.PriorSessionID, tools, provider) {
+	if task.ResumePolicy != "require_native" && shouldRetryWithFreshSession(result, task.PriorSessionID, tools, provider) {
 		firstResult := result
 		firstUsage := result.Usage
 		firstTools := tools
@@ -9303,6 +9406,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 		taskLog.Debug("backend execute returned error", "error", err)
 		return agent.Result{}, 0, err
 	}
+	if workflowRun := workflowRunFromContext(ctx); workflowRun != nil {
+		workflowRun.bind(session)
+	}
 	// This counter intentionally starts at the narrower provider-session
 	// boundary, not at the earlier server-side StartTask transition.
 	d.runningTasks.Add(1)
@@ -9383,6 +9489,15 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 				}
 			}
 			return count
+		}
+	}
+	if workflowRun := workflowRunFromContext(ctx); workflowRun != nil {
+		baseWatchdogToolCount := watchdogToolCount
+		watchdogToolCount = func() int32 {
+			if workflowRun.waitingForHuman() {
+				lastActivityAt.Store(time.Now().UnixNano())
+			}
+			return baseWatchdogToolCount()
 		}
 	}
 	// A backend that can prove its outcome is already decided outranks every
@@ -9468,6 +9583,34 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 			pendingContent.WriteString(content)
 		}
 
+		incarnationID := ""
+		if workflowRun := workflowRunFromContext(ctx); workflowRun != nil {
+			incarnationID = workflowRun.runID
+		}
+		// Capability is resolved at most once per execution, lazily before the
+		// first send. A missing/failed check must leave the producer on the legacy
+		// one-shot protocol: without a proven server-side dedupe key, a resend
+		// could duplicate a batch whose commit state is unknown (lost reply after
+		// commit). Batches captured before this point stay local evidence and are
+		// never auto-resent under legacy semantics.
+		var batchReceipts bool
+		var messageSpool *taskMessageSpool
+		var capabilityOnce sync.Once
+		resolveCapability := func() {
+			capabilityOnce.Do(func() {
+				// Bounded so a stalled server cannot delay transcript drain start.
+				capCtx, cancelCap := context.WithTimeout(ctx, 5*time.Second)
+				var capabilityErr error
+				batchReceipts, capabilityErr = d.client.TaskMessageCapabilities(capCtx, taskID)
+				cancelCap()
+				if capabilityErr != nil {
+					taskLog.Warn("task message batch receipt capability unavailable; using one-shot reporting",
+						"error", capabilityErr)
+					batchReceipts = false
+				}
+				messageSpool = newTaskMessageSpool(d.cfg, taskID, incarnationID, !batchReceipts)
+			})
+		}
 		flush := func() {
 			mu.Lock()
 			sealPendingLocked()
@@ -9476,13 +9619,69 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 			mu.Unlock()
 
 			if len(toSend) > 0 {
-				sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				if err := d.client.ReportTaskMessages(sendCtx, taskID, toSend); err != nil {
-					taskLog.Debug("failed to report task messages", "error", err)
-				} else {
-					taskLog.Debug("reported task messages", "count", len(toSend), "last_seq", toSend[len(toSend)-1].Seq)
+				resolveCapability()
+				var captured capturedTaskMessageBatch
+				var captureErr error
+				if messageSpool != nil {
+					captured, captureErr = messageSpool.capture(toSend)
+					if captureErr != nil {
+						taskLog.Error("task message capture failed; this batch is not durably retained",
+							"error", captureErr, "first_seq", toSend[0].Seq, "last_seq", toSend[len(toSend)-1].Seq)
+						// Fall through with the ORIGINAL batch. No local persistence
+						// happens, so the handler's redaction/sanitization is
+						// authoritative; running sanitizeTaskMessageBatch here would
+						// only re-pay redaction on possibly oversized output.
+					} else {
+						toSend = captured.Messages
+					}
 				}
-				cancel()
+				// messageSpool == nil or capture failed: one-shot the ORIGINAL batch.
+				if captureErr == nil && messageSpool != nil && batchReceipts {
+					// Identified path: bounded exact-payload resends are safe because
+					// the server dedupes by batch_id and 409s a changed payload.
+					sendCtx, cancel := context.WithTimeout(context.Background(), taskMessageBatchSendTimeout)
+					err := d.client.ReportTaskMessageBatch(sendCtx, taskID, captured.BatchID, toSend)
+					cancel()
+					if err == nil {
+						if ackErr := messageSpool.acknowledge(captured); ackErr != nil {
+							taskLog.Warn("failed to remove acknowledged task message capture", "error", ackErr, "batch_id", captured.BatchID)
+						}
+						taskLog.Debug("reported task messages", "count", len(toSend), "last_seq", toSend[len(toSend)-1].Seq, "batch_id", captured.BatchID)
+					} else if isTaskMessageBatchConflict(err) {
+						// Same batch_id with a different payload can only be a producer
+						// defect or disk corruption. Retaining is safe (server kept the
+						// original), but retrying the same ID can never succeed.
+						taskLog.Error("task message batch rejected as conflicting payload; capture retained for diagnosis",
+							"batch_id", captured.BatchID, "error", err)
+					} else {
+						taskLog.Warn("failed to report task messages; batch retained locally",
+							"error", err, "batch_id", captured.BatchID)
+					}
+				} else if captureErr == nil && messageSpool != nil {
+					// Legacy one-shot: the batch is durably captured but MUST NOT be
+					// resent — a lost reply may hide a committed batch. One attempt.
+					sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					err := d.client.ReportTaskMessages(sendCtx, taskID, toSend)
+					cancel()
+					if err == nil {
+						if ackErr := messageSpool.acknowledge(captured); ackErr != nil {
+							taskLog.Warn("failed to remove acknowledged task message capture", "error", ackErr, "batch_id", captured.BatchID)
+						}
+						taskLog.Debug("reported task messages", "count", len(toSend), "last_seq", toSend[len(toSend)-1].Seq)
+					} else {
+						taskLog.Warn("failed to report task messages; automatic resend disabled",
+							"error", err, "batch_id", captured.BatchID)
+					}
+				} else {
+					// No durable capture: one-shot only, never resend.
+					sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if err := d.client.ReportTaskMessages(sendCtx, taskID, toSend); err != nil {
+						taskLog.Warn("failed to report task messages", "error", err)
+					} else {
+						taskLog.Debug("reported task messages", "count", len(toSend), "last_seq", toSend[len(toSend)-1].Seq)
+					}
+					cancel()
+				}
 			}
 		}
 
@@ -9537,6 +9736,14 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 				observedAt := time.Now().UTC()
 				lastActivityAt.Store(observedAt.UnixNano())
 				switch msg.Type {
+				case agent.MessageControlState:
+					if workflowRun := workflowRunFromContext(ctx); workflowRun != nil && msg.ControlState != nil {
+						workflowRun.updateControl(*msg.ControlState)
+					}
+				case agent.MessageInteraction:
+					if workflowRun := workflowRunFromContext(ctx); workflowRun != nil && msg.Interaction != nil {
+						workflowRun.presentInteraction(*msg.Interaction)
+					}
 				case agent.MessageStatus:
 					// Persist the session/work_dir as soon as the backend
 					// reveals them. Without this, a daemon crash mid-run

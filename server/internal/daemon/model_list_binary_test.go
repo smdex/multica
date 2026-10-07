@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -16,7 +17,7 @@ import (
 )
 
 // modelListFixture stands up a Daemon whose model-list report is captured and
-// whose agent.ListModels call is stubbed, so a test can assert exactly which
+// whose agent.RefreshModels call is stubbed, so a test can assert exactly which
 // command model discovery enumerated — path and launch prefix both — without
 // shelling out to a CLI.
 type modelListFixture struct {
@@ -51,8 +52,8 @@ func newModelListFixture(t *testing.T) *modelListFixture {
 	d.profileLaunchSpecs = make(map[string]profileLaunchSpec)
 	fx.daemon = d
 
-	orig := listModels
-	listModels = func(_ context.Context, provider string, runtimeCmd agent.Command) (agent.Catalog, error) {
+	orig := refreshModels
+	refreshModels = func(_ context.Context, provider string, runtimeCmd agent.Command) (agent.Catalog, error) {
 		fx.mu.Lock()
 		fx.listedProvider = provider
 		fx.listedPath = runtimeCmd.Path
@@ -65,7 +66,7 @@ func newModelListFixture(t *testing.T) *modelListFixture {
 			SupportsExplicitStandardServiceTier: true,
 		}}}, nil
 	}
-	t.Cleanup(func() { listModels = orig })
+	t.Cleanup(func() { refreshModels = orig })
 
 	return fx
 }
@@ -176,6 +177,40 @@ func TestHandleModelList_BuiltinRuntimeUnaffected(t *testing.T) {
 	}
 	if got := report["status"]; got != "completed" {
 		t.Fatalf("report status = %v, want completed (report: %v)", got, report)
+	}
+}
+
+func TestHandleModelListReportsFallbackAndModelMetadata(t *testing.T) {
+	fx := newModelListFixture(t)
+	d := fx.daemon
+	d.cfg.Agents = map[string]AgentEntry{"codex": {Path: fakeExecutable(t, "codex")}}
+	want := []agent.Model{{
+		ID: "runtime-model", Label: "Runtime model", Provider: "openai", Default: true,
+		Thinking: &agent.ModelThinking{
+			SupportedLevels: []agent.ThinkingLevel{{Value: "future", Label: "Future", Description: "Native effort"}},
+			DefaultLevel:    "future",
+		},
+		ServiceTiers:                        []agent.ModelServiceTier{{ID: "priority", Name: "Fast", Description: "Priority routing"}},
+		SupportsExplicitStandardServiceTier: true,
+	}}
+	refreshModels = func(context.Context, string, agent.Command) (agent.Catalog, error) {
+		return agent.Catalog{Models: want, Fallback: true}, nil
+	}
+	d.handleModelList(context.Background(), Runtime{ID: "rt-builtin", Provider: "codex"}, "req-1")
+	_, _, _, report := fx.snapshot()
+	if report["fallback"] != true || report["status"] != "completed" {
+		t.Fatalf("fallback provenance lost: %+v", report)
+	}
+	raw, err := json.Marshal(report["models"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []agent.Model
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("wire models = %+v, want %+v", got, want)
 	}
 }
 
@@ -315,7 +350,7 @@ func TestHandleModelList_CustomOmpCompatibilityTarget(t *testing.T) {
 		t.Skip("POSIX fixture")
 	}
 	fx := newModelListFixture(t)
-	listModels = agent.ListModels
+	refreshModels = agent.RefreshModels
 	path := fakeExecutable(t, "omp-wrapper")
 	script := `#!/bin/sh
 [ "$1" = "launch" ] || exit 3

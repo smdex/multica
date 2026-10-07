@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+inputs:
+  android-nixpkgs:
+    url: github:tadfisher/android-nixpkgs/stable
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  llm-agents:
+    url: github:smdex/llm-agents.nix
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixos-unstable
+allow_unfree: true
+nixpkgs:
+  permitted_unfree_packages:
+  - multica
+  - multica-desktop
+  - claude-code

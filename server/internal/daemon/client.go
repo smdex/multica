@@ -214,6 +214,8 @@ func daemonCommonCapabilities() []string {
 		protocol.DaemonCapabilityPlatformSkillV1,
 		protocol.DaemonCapabilityCheckoutKeepsWorkV1,
 		protocol.DaemonCapabilityJoinedWakeupsV1,
+		protocol.DaemonCapabilityNativeSessionImportV1,
+		protocol.DaemonCapabilityChatControlsV1,
 	}
 }
 
@@ -501,9 +503,13 @@ func (c *Client) StartTask(ctx context.Context, task Task, capabilities ...strin
 		return nil
 	}
 	path := fmt.Sprintf("/api/daemon/tasks/%s/start", task.ID)
+	body := map[string]any{"capabilities": capabilities}
+	if strings.TrimSpace(task.WorkflowRunID) != "" {
+		body["run_id"] = task.WorkflowRunID
+	}
 	if !task.StartClaimSupported {
 		// Old servers have no safe replay contract. Preserve one attempt.
-		err := c.postJSON(ctx, path, map[string]any{"capabilities": capabilities}, decodeResponse)
+		err := c.postJSON(ctx, path, body, decodeResponse)
 		return err == nil && negotiated, err
 	}
 	if task.RuntimeID == "" || task.DispatchedAt == "" {
@@ -511,11 +517,9 @@ func (c *Client) StartTask(ctx context.Context, task Task, capabilities ...strin
 	}
 	ctx, cancel := context.WithTimeout(ctx, startTaskTimeout)
 	defer cancel()
-	err := c.postJSONWithRetry(ctx, path, map[string]any{
-		"runtime_id":    task.RuntimeID,
-		"capabilities":  capabilities,
-		"dispatched_at": task.DispatchedAt,
-	}, decodeResponse, startTaskRetrySchedule)
+	body["runtime_id"] = task.RuntimeID
+	body["dispatched_at"] = task.DispatchedAt
+	err := c.postJSONWithRetry(ctx, path, body, decodeResponse, startTaskRetrySchedule)
 	var reqErr *requestError
 	if errors.As(err, &reqErr) && reqErr.StatusCode == http.StatusConflict {
 		return false, fmt.Errorf("%w: %w", errStartClaimRejected, err)
@@ -616,6 +620,69 @@ func (c *Client) ReportTaskMessages(ctx context.Context, taskID string, messages
 	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/messages", taskID), map[string]any{
 		"messages": messages,
 	}, nil)
+}
+
+// taskMessageBatchRetrySchedule bounds resends of an identified transcript
+// batch. Retrying is safe only because the server dedupes exact replays by
+// batch_id and answers a payload conflict with a permanent 409; the legacy
+// no-batch_id path never retries, so this schedule must stay unreachable for
+// ReportTaskMessages.
+var taskMessageBatchRetrySchedule = []time.Duration{
+	500 * time.Millisecond,
+	1 * time.Second,
+	2 * time.Second,
+}
+
+// taskMessageBatchSendTimeout bounds one flush's whole batch attempt chain
+// (initial send plus bounded retries), so a stalled server cannot pin the
+// drain goroutine past its hand-off window.
+const taskMessageBatchSendTimeout = 10 * time.Second
+
+// TaskMessageCapabilities reports whether the server offers batch-receipt
+// idempotency for this task's transcript. Any error returns false with the
+// error: the caller must then keep the legacy one-shot protocol, where a
+// resend could duplicate a batch whose commit state is unknown.
+func (c *Client) TaskMessageCapabilities(ctx context.Context, taskID string) (bool, error) {
+	var resp struct {
+		BatchReceipts bool `json:"batch_receipts"`
+	}
+	if err := c.getJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/messages/capabilities", taskID), &resp); err != nil {
+		return false, err
+	}
+	return resp.BatchReceipts, nil
+}
+
+// ReportTaskMessageBatch posts a transcript batch identified by batchID. On a
+// transient failure it resends the exact same payload within the caller's
+// context budget: the server commits it once or replays the committed receipt
+// {status:"ok",batch_id:<same UUID>}. A different payload under the same
+// (task, batch_id) surfaces as a 409 requestError. A 200 whose receipt does
+// not echo batchID is a malformed response, not a commit proof, and is
+// returned as an error so the caller keeps its retained copy.
+func (c *Client) ReportTaskMessageBatch(ctx context.Context, taskID, batchID string, messages []TaskMessageData) error {
+	var resp struct {
+		Status  string `json:"status"`
+		BatchID string `json:"batch_id"`
+	}
+	err := c.postJSONWithRetry(ctx, fmt.Sprintf("/api/daemon/tasks/%s/messages", taskID), map[string]any{
+		"batch_id": batchID, "messages": messages,
+	}, &resp, taskMessageBatchRetrySchedule)
+	if err != nil {
+		return err
+	}
+	if resp.Status != "ok" || resp.BatchID != batchID {
+		return fmt.Errorf("%w: batch receipt %q/status %q does not echo batch %q",
+			errInvalidResponseBody, resp.BatchID, resp.Status, batchID)
+	}
+	return nil
+}
+
+// isTaskMessageBatchConflict reports whether err is the server's permanent
+// rejection of a different payload under a batch_id this producer already
+// used. The retained capture must not be silently replayed or deleted.
+func isTaskMessageBatchConflict(err error) bool {
+	var reqErr *requestError
+	return errors.As(err, &reqErr) && reqErr.StatusCode == http.StatusConflict
 }
 
 func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string) error {
@@ -734,15 +801,40 @@ type (
 	PendingLocalSkillImport = protocol.DaemonHeartbeatPendingLocalSkillImport
 )
 
-func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
+func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string, workflowCapabilities ...*protocol.AgentWorkflowCapabilities) (*HeartbeatResponse, error) {
 	var resp HeartbeatResponse
-	if err := c.postJSON(ctx, "/api/daemon/heartbeat", map[string]any{
+	body := map[string]any{
 		"runtime_id":            runtimeID,
 		"supports_batch_import": true,
-	}, &resp); err != nil {
+	}
+	if len(workflowCapabilities) > 0 && workflowCapabilities[0] != nil {
+		body["agent_workflow_capabilities"] = workflowCapabilities[0]
+	}
+	if err := c.postJSON(ctx, "/api/daemon/heartbeat", body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// ReportAgentWorkflowResult sends one idempotent terminal command outcome.
+// A caller may replay this exact body after a lost HTTP acknowledgement.
+func (c *Client) ReportAgentWorkflowResult(ctx context.Context, runtimeID, requestID string, result protocol.AgentWorkflowCommandResult) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/agent-workflow-requests/%s/result", runtimeID, requestID), result, nil)
+}
+
+// ReportTaskControlState publishes the current foreground-turn admission for
+// an already server-registered run.
+func (c *Client) ReportTaskControlState(ctx context.Context, taskID string, state protocol.TaskControlState) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/controls", taskID), state, nil)
+}
+
+// ReportTaskInteraction persists a normalized provider request without
+// exposing provider-local callback identifiers.
+func (c *Client) ReportTaskInteraction(ctx context.Context, taskID, runID string, interaction protocol.AgentWorkflowInteractionRequest) error {
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/interactions", taskID), map[string]any{
+		"run_id":      runID,
+		"interaction": interaction,
+	}, nil)
 }
 
 // ReportUpdateResult sends the CLI update result back to the server.

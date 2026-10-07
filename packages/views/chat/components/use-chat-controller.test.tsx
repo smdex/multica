@@ -71,6 +71,8 @@ const h = vi.hoisted(() => {
     appForeground: { value: true },
     consumeRestoreMutate: vi.fn(),
     setProjectMutate: vi.fn(),
+    setInteractionModeMutate: vi.fn(),
+    steerMutate: vi.fn(),
     removeFromCaches: vi.fn(),
     // useQuery reads these so each test can vary the loaded data.
     sessions: [] as ChatSession[],
@@ -143,6 +145,11 @@ vi.mock("@multica/core/chat/mutations", () => ({
     mutate: h.setProjectMutate,
     isPending: false,
   }),
+  useSetChatSessionInteractionMode: () => ({
+    mutateAsync: h.setInteractionModeMutate,
+    isPending: false,
+  }),
+  useSteerChatSession: () => ({ mutateAsync: h.steerMutate, isPending: false }),
   useConsumeChatDraftRestore: () => ({ mutate: h.consumeRestoreMutate }),
 }));
 vi.mock("../../common/use-app-foreground", () => ({
@@ -188,6 +195,7 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
       isFetchingNextPage: false,
     }),
     useQueryClient: () => h.queryClient,
+    useQueries: () => [],
   };
 });
 

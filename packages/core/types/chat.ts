@@ -109,6 +109,10 @@ export interface ChatSession {
   channel_source?: ChatChannelSource;
   /** Absent for first-party Chats. */
   is_current_channel_route?: boolean;
+  /** Explicit server-owned interaction policy for first-party chats. */
+  interaction_mode?: ChatInteractionMode;
+  /** Additive provenance for an imported, owned native-history copy. */
+  native_origin?: ChatNativeOrigin;
   created_at: string;
   updated_at: string;
 }
@@ -172,7 +176,166 @@ export interface ChatMessage {
   message_kind?: ChatMessageKind;
   /** Up to three server-validated follow-ups generated with this reply. */
   quick_actions?: ChatQuickAction[];
+  /**
+   * Settled historical provider events imported with this assistant row. They
+   * use the existing task timeline shape but never carry a synthetic task id.
+   */
+  imported_events?: import("./events").TaskMessagePayload[];
 }
+
+export type ChatInteractionMode = "chat" | "autonomous";
+
+export interface ChatNativeOrigin {
+  provider: string;
+  imported_at: string;
+}
+
+export interface WorkflowCapabilities {
+  runtime_id: string;
+  provider: string;
+  online: boolean;
+  native_sessions: {
+    list: boolean;
+    import: boolean;
+  };
+  controls: {
+    steer: boolean;
+    approvals: boolean;
+    questions: boolean;
+  };
+  reason: string | null;
+}
+
+export type WorkflowRequestKind =
+  | "native_session_list"
+  | "native_session_import"
+  | "steer"
+  | "interaction_response"
+  | "unknown";
+
+export type WorkflowRequestStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "unknown";
+
+export interface WorkflowRequestError {
+  code: string;
+  message: string;
+}
+
+export interface NativeSessionSummary {
+  session_ref: string;
+  revision: string;
+  provider: string;
+  title: string;
+  cwd: string;
+  preview: string;
+  updated_at: string;
+  model: string | null;
+  imported_chat_session_id: string | null;
+}
+
+export interface NativeSessionListResult {
+  sessions: NativeSessionSummary[];
+  next_cursor: string | null;
+  truncated: boolean;
+}
+
+export interface NativeSessionImportResult {
+  chat_session_id: string;
+  already_imported: boolean;
+  warnings: string[];
+}
+
+export interface WorkflowRequest {
+  id: string;
+  runtime_id: string;
+  provider: string;
+  kind: WorkflowRequestKind;
+  status: WorkflowRequestStatus;
+  result: NativeSessionListResult | NativeSessionImportResult | ChatControlResult | null;
+  error: WorkflowRequestError | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatControls {
+  chat_session_id: string;
+  runtime_id: string;
+  task_id: string | null;
+  run_id: string | null;
+  turn_id: string | null;
+  active: boolean;
+  can_steer: boolean;
+  can_approve: boolean;
+  can_answer: boolean;
+  interaction_mode: ChatInteractionMode | "unknown";
+  reason: string | null;
+}
+
+export interface ChatControlResult {
+  delivery: "accepted" | "rejected" | "unknown";
+  message_id: string | null;
+}
+
+export type ChatInteractionKind = "approval" | "question" | "unknown";
+export type ChatInteractionStatus =
+  | "pending"
+  | "resolving"
+  | "resolved"
+  | "expired"
+  | "cancelled"
+  | "unknown";
+
+export interface ChatInteractionOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface ChatInteractionQuestion {
+  id: string;
+  prompt: string;
+  options: ChatInteractionOption[];
+  multiple: boolean;
+  allow_text: boolean;
+  secret: boolean;
+}
+
+export interface ChatInteraction {
+  id: string;
+  chat_session_id: string;
+  task_id: string;
+  run_id: string;
+  turn_id: string;
+  kind: ChatInteractionKind;
+  status: ChatInteractionStatus;
+  version: number;
+  title: string;
+  description: string;
+  tool: string;
+  input: Record<string, unknown>;
+  choices: ChatInteractionOption[];
+  questions: ChatInteractionQuestion[];
+  expires_at: string;
+}
+
+export interface ChatInteractionsResponse {
+  items: ChatInteraction[];
+}
+
+export interface ChatInteractionAnswer {
+  question_id: string;
+  option_ids: string[];
+  text: string;
+}
+
+export type ChatInteractionResponse =
+  | { choice_id: "allow_once" | "deny" }
+  | { answers: ChatInteractionAnswer[] }
+  | { cancelled: true };
 
 export interface ChatMessagesCursor {
   created_at: string;

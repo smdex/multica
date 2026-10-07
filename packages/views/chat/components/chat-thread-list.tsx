@@ -11,10 +11,20 @@ import {
   Loader2,
   Pin,
   PinOff,
+  Search,
   Square,
   Trash2,
 } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
+import { Button } from "@multica/ui/components/ui/button";
+import { Input } from "@multica/ui/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@multica/ui/components/ui/select";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { paths, useWorkspaceSlug } from "@multica/core/paths";
 import { useWorkspacePresenceMap } from "@multica/core/agents";
@@ -37,8 +47,11 @@ import { resolveClickIntent, useOptionalNavigation } from "../../navigation";
 import { createLogger } from "@multica/core/logger";
 import { removeChatMessageFromCaches } from "@multica/core/realtime";
 import { useLocale, useT } from "../../i18n";
+import { chatThreadPreview, filterChatThreadSessions } from "./chat-thread-list-filters";
 
 const apiLogger = createLogger("chat.api");
+
+const ALL_AGENTS_FILTER_VALUE = "__all_agents__";
 
 // IM-style timestamp: today → clock, this year → M/D, else full date.
 function formatChatTime(dateStr: string, locale: string): string {
@@ -51,15 +64,6 @@ function formatChatTime(dateStr: string, locale: string): string {
     return d.toLocaleDateString(locale, { month: "numeric", day: "numeric" });
   }
   return d.toLocaleDateString(locale);
-}
-
-// Collapse a (possibly markdown / multi-line) message into a one-line preview.
-function toPreview(content: string): string {
-  return content
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/[#*`>~]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 /**
@@ -123,13 +127,47 @@ export function ChatThreadList({
     [sessions],
   );
 
+  // Chat sessions store a durable Multica agent ID, but not the runtime or
+  // provider that handled each historical turn. Use the current agent only as
+  // the filter label; the value remains the exact session agent ID.
+  const agentFilterItems = useMemo(() => {
+    const sessionAgentIds = new Set(sessions.map((session) => session.agent_id));
+
+    return agents
+      .flatMap((agent) => {
+        const label = agent.name.trim();
+        return sessionAgentIds.has(agent.id) && label ? [{ value: agent.id, label }] : [];
+      })
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [agents, sessions]);
+
   // Which view is showing. Falls back to history when the archived list drains
   // (last chat unarchived / deleted) so we never strand the user on an empty
   // archive.
   const [view, setView] = useState<"history" | "archived">("history");
+  const [search, setSearch] = useState("");
+  const [agentFilterId, setAgentFilterId] = useState<string | null>(null);
   useEffect(() => {
     if (view === "archived" && archivedSessions.length === 0) setView("history");
   }, [view, archivedSessions.length]);
+  useEffect(() => {
+    if (agentFilterId && !agentFilterItems.some((item) => item.value === agentFilterId)) {
+      setAgentFilterId(null);
+    }
+  }, [agentFilterId, agentFilterItems]);
+
+  const visibleSessions = useMemo(
+    () =>
+      filterChatThreadSessions(view === "archived" ? archivedSessions : historySessions, {
+        agentId: agentFilterId,
+        query: search,
+      }),
+    [agentFilterId, archivedSessions, historySessions, search, view],
+  );
+  const resetFilters = () => {
+    setSearch("");
+    setAgentFilterId(null);
+  };
 
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [confirmingStopId, setConfirmingStopId] = useState<string | null>(null);
@@ -258,7 +296,7 @@ export function ChatThreadList({
       previewNode = (
         <span className={cn("block truncate", unread > 0 ? "text-foreground" : "text-muted-foreground")}>
           {last.role === "user" ? t(($) => $.list.you_prefix) : ""}
-          {toPreview(last.content)}
+          {chatThreadPreview(last.content)}
         </span>
       );
     } else {
@@ -477,6 +515,59 @@ export function ChatThreadList({
     );
   };
 
+  const filterControls = (
+    <div className="flex min-w-0 items-center gap-1 px-2 py-1">
+      <div className="relative min-w-0 flex-1">
+        <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          type="search"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          aria-label={t(($) => $.list.search_aria)}
+          placeholder={t(($) => $.list.search_placeholder)}
+          className="h-7 pl-7 text-caption"
+        />
+      </div>
+      <Select
+        items={[
+          { value: ALL_AGENTS_FILTER_VALUE, label: t(($) => $.list.all_agents) },
+          ...agentFilterItems,
+        ]}
+        value={agentFilterId ?? ALL_AGENTS_FILTER_VALUE}
+        onValueChange={(value) =>
+          setAgentFilterId(value && value !== ALL_AGENTS_FILTER_VALUE ? value : null)
+        }
+      >
+        <SelectTrigger
+          size="sm"
+          className="min-w-0 max-w-32 flex-1"
+          aria-label={t(($) => $.list.agent_filter_aria)}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent align="end">
+          <SelectItem value={ALL_AGENTS_FILTER_VALUE}>
+            {t(($) => $.list.all_agents)}
+          </SelectItem>
+          {agentFilterItems.map((item) => (
+            <SelectItem key={item.value} value={item.value}>
+              {item.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+
+  const filteredEmpty = (
+    <div className="px-2 py-3 text-center text-caption text-muted-foreground">
+      <p>{t(($) => $.list.filtered_empty)}</p>
+      <Button type="button" variant="ghost" size="xs" className="mt-1" onClick={resetFilters}>
+        {t(($) => $.list.clear_filters)}
+      </Button>
+    </div>
+  );
+
   // Archived view: a back header, then the archived rows. Delete lives only
   // here (via each row's hover actions).
   if (view === "archived") {
@@ -493,7 +584,8 @@ export function ChatThreadList({
             {archivedSessions.length}
           </span>
         </button>
-        {archivedSessions.map(renderRow)}
+        {filterControls}
+        {visibleSessions.length > 0 ? visibleSessions.map(renderRow) : filteredEmpty}
       </>
     );
   }
@@ -527,7 +619,8 @@ export function ChatThreadList({
 
   return (
     <>
-      {historySessions.map(renderRow)}
+      {filterControls}
+      {visibleSessions.length > 0 ? visibleSessions.map(renderRow) : filteredEmpty}
       {archivedEntry}
     </>
   );

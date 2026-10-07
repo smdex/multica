@@ -2,6 +2,17 @@ packages:
   - apps/*
   - packages/*
 
+allowBuilds:
+  core-js: set this to true or false
+  electron: set this to true or false
+  electron-winstaller: set this to true or false
+  esbuild: set this to true or false
+  msw: set this to true or false
+  protobufjs: set this to true or false
+  sharp: set this to true or false
+  unicode-animations: set this to true or false
+  unrs-resolver: set this to true or false
+
 catalog:
   '@formatjs/intl-localematcher': ^0.8.4
   '@tailwindcss/postcss': ^4

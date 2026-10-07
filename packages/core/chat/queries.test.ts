@@ -8,6 +8,9 @@ import {
   mergeTaskMessagesBySeq,
   sortChatSessions,
   taskMessagesOptions,
+  chatControlsOptions,
+  chatInteractionsOptions,
+  workflowRequestOptions,
   unionTaskMessagesBySeq,
 } from "./queries";
 
@@ -32,6 +35,30 @@ describe("taskMessagesOptions", () => {
 
     expect(isTaskMessageTaskId(taskId)).toBe(false);
     expect(taskMessagesOptions(taskId).enabled).toBe(false);
+  });
+});
+
+describe("agent workflow polling", () => {
+  it("keys controls and interactions by workspace and session, and only polls visible chats", () => {
+    const controls = chatControlsOptions("ws-1", "chat-1", true);
+    const hiddenInteractions = chatInteractionsOptions("ws-1", "chat-1", false);
+
+    expect(controls.queryKey).toEqual([
+      "chat", "ws-1", "agent-workflow", "sessions", "chat-1", "controls",
+    ]);
+    expect(controls.refetchInterval).toBe(2_000);
+    expect(hiddenInteractions.enabled).toBe(false);
+    expect(hiddenInteractions.refetchInterval).toBe(false);
+  });
+
+  it("stops operation polling once the server reports a terminal state", () => {
+    const options = workflowRequestOptions("ws-1", "runtime-1", "request-1");
+    const interval = options.refetchInterval as (query: { state: { data?: { status?: string } } }) =>
+      number | false;
+
+    expect(interval({ state: { data: { status: "running" } } })).toBe(1_000);
+    expect(interval({ state: { data: { status: "unknown" } } })).toBe(false);
+    expect(interval({ state: { data: { status: "completed" } } })).toBe(false);
   });
 });
 

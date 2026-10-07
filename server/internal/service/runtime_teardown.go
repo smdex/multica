@@ -24,6 +24,7 @@ func OfflineRuntimeTTLDays() int {
 }
 
 var (
+	ErrRuntimeHasWorkSources = errors.New("runtime still owns work sources")
 	// ErrRuntimeNotDrained means a runtime or one of its bound user agents
 	// still owns a non-terminal task. Callers must abort the transaction rather
 	// than deleting the runtime and relying on database cascades.
@@ -76,6 +77,18 @@ func TeardownRuntime(ctx context.Context, qtx *db.Queries, runtimeID pgtype.UUID
 	runtime, err := qtx.LockAgentRuntime(ctx, runtimeID)
 	if err != nil {
 		return out, fmt.Errorf("load runtime: %w", err)
+	}
+	hasSources, err := qtx.RuntimeHasWorkSources(ctx, db.RuntimeHasWorkSourcesParams{RuntimeID: runtimeID, WorkspaceID: runtime.WorkspaceID})
+	if err != nil {
+		return out, fmt.Errorf("check runtime work sources: %w", err)
+	}
+	if hasSources {
+		return out, ErrRuntimeHasWorkSources
+	}
+	// System-chat writers lock their session before their task. Fence them
+	// before cancelling/detaching tasks, not only immediately before pruning.
+	if _, err := qtx.LockChatSessionsBySystemRuntimeAgents(ctx, runtimeID); err != nil {
+		return out, fmt.Errorf("lock system chat sessions: %w", err)
 	}
 	lockedAgents, err := qtx.ListUserAgentsByRuntimeForUpdate(ctx, runtimeID)
 	if err != nil {
@@ -168,7 +181,19 @@ func TeardownRuntime(ctx context.Context, qtx *db.Queries, runtimeID pgtype.UUID
 // pruneRuntimeSystemAgentChatDraftRestores removes rows without a database FK
 // before the system agents and their chat sessions cascade away.
 func pruneRuntimeSystemAgentChatDraftRestores(ctx context.Context, q *db.Queries, runtimeID pgtype.UUID) error {
-	if _, err := q.LockChatSessionsBySystemRuntimeAgents(ctx, runtimeID); err != nil {
+	sessions, err := q.LockChatSessionsBySystemRuntimeAgents(ctx, runtimeID)
+	if err != nil {
+		return err
+	}
+	for _, id := range sessions {
+		if err := q.DeleteTaskInteractionsByChatSession(ctx, id); err != nil {
+			return err
+		}
+		if err := q.DeleteAgentWorkflowRequestsByChatSession(ctx, id); err != nil {
+			return err
+		}
+	}
+	if err := q.DeleteWorkflowRequestsBySystemRuntimeAgents(ctx, runtimeID); err != nil {
 		return err
 	}
 	if err := q.DeleteChatDraftRestoresBySystemRuntimeAgents(ctx, runtimeID); err != nil {

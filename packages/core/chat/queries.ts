@@ -6,6 +6,7 @@ import type {
   ChatQuickActionsFailureState,
   ChatQuickActionsPendingState,
   ChatSession,
+  WorkflowRequest,
 } from "../types/chat";
 
 /**
@@ -66,7 +67,60 @@ export const chatKeys = {
   /** Per-task execution messages — shared with issue agent cards. */
   taskMessagesAll: () => ["task-messages"] as const,
   taskMessages: (taskId: string) => [...chatKeys.taskMessagesAll(), taskId] as const,
+  workflowAll: (wsId: string) => [...chatKeys.all(wsId), "agent-workflow"] as const,
+  workflowCapabilities: (wsId: string, runtimeId: string) =>
+    [...chatKeys.workflowAll(wsId), "runtimes", runtimeId, "capabilities"] as const,
+  workflowRequest: (wsId: string, runtimeId: string, requestId: string) =>
+    [...chatKeys.workflowAll(wsId), "runtimes", runtimeId, "requests", requestId] as const,
+  controls: (wsId: string, sessionId: string) =>
+    [...chatKeys.workflowAll(wsId), "sessions", sessionId, "controls"] as const,
+  interactions: (wsId: string, sessionId: string) =>
+    [...chatKeys.workflowAll(wsId), "sessions", sessionId, "interactions"] as const,
 };
+
+export function workflowCapabilitiesOptions(wsId: string, runtimeId: string) {
+  return queryOptions({
+    queryKey: chatKeys.workflowCapabilities(wsId, runtimeId),
+    queryFn: () => api.getAgentWorkflowCapabilities(runtimeId),
+    enabled: !!wsId && !!runtimeId,
+    staleTime: 0,
+  });
+}
+
+export function workflowRequestOptions(wsId: string, runtimeId: string, requestId: string) {
+  return queryOptions({
+    queryKey: chatKeys.workflowRequest(wsId, runtimeId, requestId),
+    queryFn: () => api.getAgentWorkflowRequest(runtimeId, requestId),
+    enabled: !!wsId && !!runtimeId && !!requestId,
+    staleTime: 0,
+    refetchInterval: (query) => {
+      const status = (query.state.data as WorkflowRequest | undefined)?.status;
+      return status === "pending" || status === "running" ? 1_000 : false;
+    },
+  });
+}
+
+/** Poll only while a chat surface is visible; reconnect invalidation refetches it. */
+export function chatControlsOptions(wsId: string, sessionId: string, visible: boolean) {
+  return queryOptions({
+    queryKey: chatKeys.controls(wsId, sessionId),
+    queryFn: () => api.getChatControls(sessionId),
+    enabled: !!wsId && !!sessionId && visible,
+    staleTime: 0,
+    refetchInterval: visible ? 2_000 : false,
+  });
+}
+
+/** Poll unresolved interactions beside the visible chat instead of inventing WS events. */
+export function chatInteractionsOptions(wsId: string, sessionId: string, visible: boolean) {
+  return queryOptions({
+    queryKey: chatKeys.interactions(wsId, sessionId),
+    queryFn: () => api.listChatInteractions(sessionId),
+    enabled: !!wsId && !!sessionId && visible,
+    staleTime: 0,
+    refetchInterval: visible ? 2_000 : false,
+  });
+}
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

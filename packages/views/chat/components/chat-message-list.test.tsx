@@ -354,6 +354,55 @@ describe("ChatMessageList live timeline (MUL-3960 regression)", () => {
     expect(screen.getAllByText("Complete canonical answer")).toHaveLength(1);
   });
 
+  it("renders imported settled events through the existing timeline without a task row", async () => {
+    const importedEvents: TaskMessagePayload[] = [
+      {
+        task_id: "",
+        issue_id: "",
+        seq: 0,
+        type: "text",
+        content: "Imported progress note",
+      },
+      {
+        task_id: "",
+        issue_id: "",
+        seq: 1,
+        type: "tool_use",
+        tool: "Read",
+        input: { path: "/work/project/README.md" },
+      },
+    ];
+
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={new QueryClient()}>
+          <ChatMessageList
+            messages={[{
+              id: "imported-answer",
+              chat_session_id: "session-1",
+              role: "assistant",
+              content: "Imported final answer",
+              task_id: null,
+              imported_events: importedEvents,
+              created_at: "2026-09-17T00:00:00Z",
+            }]}
+            pendingTask={null}
+            availability="online"
+          />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByText("Imported final answer")).toBeInTheDocument();
+    expect(screen.getByText("1 step")).toBeInTheDocument();
+    expect(document.querySelector('[data-row-key="imported-answer"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-row-key^="task:"]')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("1 step"));
+    expect(screen.getByText("Imported progress note")).toBeInTheDocument();
+    expect(screen.getByText("Read")).toBeInTheDocument();
+  });
+
   it("keeps the answer node mounted across the live-to-settled handoff", async () => {
     const qc = new QueryClient();
     qc.setQueryData(chatKeys.taskMessages(TASK_ID), [

@@ -544,17 +544,17 @@ INSERT INTO agent_task_queue (
     originator_source, delegated_from_task_id, rule_version_id,
     trigger_evidence_kind, trigger_evidence_ref_id, retry_of_task_id,
     chat_input_task_id, fire_at,
-    channel_context_revision, handoff_note, id
+    channel_context_revision, handoff_note, interaction_mode, resume_policy, id
 )
 SELECT
     p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
     CASE WHEN sqlc.narg(fire_at)::timestamptz IS NOT NULL THEN 'deferred' ELSE 'queued' END,
     CASE WHEN p.chat_session_id IS NOT NULL THEN GREATEST(p.priority, 3) ELSE p.priority END,
     p.trigger_comment_id, p.coalesced_comment_ids, p.trigger_summary, p.context,
-    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.session_id END,
+    CASE WHEN p.resume_policy = 'require_native' THEN p.session_id WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.session_id END,
     p.work_dir,
     p.attempt + 1, COALESCE(sqlc.narg(max_attempts)::int, p.max_attempts), p.id,
-    p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity',
+    CASE WHEN p.resume_policy = 'require_native' THEN FALSE ELSE p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' END,
     p.is_leader_task,
     p.squad_id,
     p.originator_user_id,
@@ -566,6 +566,8 @@ SELECT
     p.chat_input_task_id, sqlc.narg(fire_at),
     p.channel_context_revision,
     CASE WHEN p.context->>'wakeup_id' IS NOT NULL THEN p.handoff_note END,
+    p.interaction_mode,
+    p.resume_policy,
     -- Named new_task_id, not id: $1 above is the PARENT task's id.
     COALESCE(sqlc.narg('new_task_id')::uuid, gen_random_uuid())
 FROM agent_task_queue p
@@ -783,6 +785,10 @@ WHERE id = (
                 OR r.visibility = 'private'
             )
             AND r.status = 'online'
+            AND (
+                atq.resume_policy <> 'require_native'
+                OR COALESCE(r.agent_workflow_capabilities #>> '{native_sessions,import}', 'false') = 'true'
+            )
             AND COALESCE(r.last_seen_at, r.updated_at) >=
                 now() - make_interval(secs => @runtime_stale_secs::double precision)
       )
@@ -996,6 +1002,45 @@ SELECT * FROM agent_task_queue
 WHERE id = $1 AND runtime_id = $2 AND dispatched_at = $3
   AND status IN ('dispatched', 'waiting_local_directory', 'running')
 FOR UPDATE;
+
+-- name: StartAgentTaskWithRun :one
+-- The workflow-enabled daemon registers its fresh run id at the same state
+-- transition that starts the task. A controls report therefore cannot invent
+-- or replace an execution after the fact.
+UPDATE agent_task_queue
+SET status = 'running',
+    started_at = now(),
+    wait_reason = NULL,
+    prepare_lease_expires_at = NULL,
+    active_run_id = @active_run_id,
+    control_state = NULL,
+    control_updated_at = NULL
+WHERE id = @id AND status IN ('dispatched', 'waiting_local_directory')
+RETURNING *;
+
+-- name: GetActiveChatControlTask :one
+SELECT * FROM agent_task_queue
+WHERE chat_session_id = $1
+  AND status = 'running'
+  AND active_run_id IS NOT NULL
+  AND control_state IS NOT NULL
+ORDER BY started_at DESC
+LIMIT 1;
+
+-- name: LockAgentTaskForControls :one
+SELECT * FROM agent_task_queue
+WHERE id = $1
+FOR UPDATE;
+
+-- name: UpdateAgentTaskControlState :one
+UPDATE agent_task_queue
+SET control_state = @control_state::jsonb,
+    control_updated_at = now()
+WHERE id = @id
+  AND runtime_id = @runtime_id
+  AND active_run_id = @active_run_id
+  AND status = 'running'
+RETURNING *;
 
 -- name: MarkAgentTaskWaitingLocalDirectory :one
 -- Transitions a freshly-dispatched task into 'waiting_local_directory' while

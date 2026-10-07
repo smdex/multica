@@ -857,6 +857,17 @@ func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRunti
 		// inside the reassignment would refuse anyway.
 		return errRuntimeMergeFenced
 	}
+	oldRuntime, err := qtx.GetAgentRuntime(ctx, oldRuntimeID)
+	if err != nil {
+		return fmt.Errorf("load legacy runtime work source scope: %w", err)
+	}
+	hasSources, err := qtx.RuntimeHasWorkSources(ctx, db.RuntimeHasWorkSourcesParams{RuntimeID: oldRuntimeID, WorkspaceID: oldRuntime.WorkspaceID})
+	if err != nil {
+		return fmt.Errorf("check legacy runtime work sources: %w", err)
+	}
+	if hasSources {
+		return errRuntimeMergeFenced
+	}
 
 	reassignment, err := qtx.ReassignTasksToRuntime(ctx, db.ReassignTasksToRuntimeParams{
 		NewRuntimeID: newRuntimeID,
@@ -1021,8 +1032,9 @@ func (h *Handler) DaemonDeregister(w http.ResponseWriter, r *http.Request) {
 }
 
 type DaemonHeartbeatRequest struct {
-	RuntimeID           string `json:"runtime_id"`
-	SupportsBatchImport bool   `json:"supports_batch_import,omitempty"`
+	RuntimeID                 string                              `json:"runtime_id"`
+	SupportsBatchImport       bool                                `json:"supports_batch_import,omitempty"`
+	AgentWorkflowCapabilities *protocol.AgentWorkflowCapabilities `json:"agent_workflow_capabilities,omitempty"`
 }
 
 // heartbeatHasPendingTimeout bounds the cheap HasPending probe on the
@@ -1164,7 +1176,20 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	updateMs = time.Since(updateStart).Milliseconds()
 
-	ack, m, err := h.processHeartbeat(r.Context(), runtimeID, req.SupportsBatchImport)
+	if req.AgentWorkflowCapabilities != nil {
+		capabilities, err := json.Marshal(req.AgentWorkflowCapabilities)
+		if err != nil {
+			outcome = "bad_workflow_capabilities"
+			writeError(w, http.StatusBadRequest, "invalid agent_workflow_capabilities")
+			return
+		}
+		if err := h.Queries.UpdateAgentRuntimeWorkflowCapabilities(r.Context(), db.UpdateAgentRuntimeWorkflowCapabilitiesParams{ID: rt.ID, Capabilities: capabilities}); err != nil {
+			outcome = "error_update"
+			writeError(w, http.StatusInternalServerError, "heartbeat failed")
+			return
+		}
+	}
+	ack, m, err := h.processHeartbeat(r.Context(), runtimeID, req.SupportsBatchImport, req.AgentWorkflowCapabilities)
 	probeModelMs = m.ProbeModelMs
 	popModelMs = m.PopModelMs
 	probeSkillsMs = m.ProbeSkillsMs
@@ -1200,6 +1225,12 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if len(ack.PendingLocalSkillImports) > 0 {
 		resp["pending_local_skill_imports"] = ack.PendingLocalSkillImports
 	}
+	if len(ack.ServerCapabilities) > 0 {
+		resp["server_capabilities"] = ack.ServerCapabilities
+	}
+	if len(ack.PendingAgentWorkflow) > 0 {
+		resp["pending_agent_workflow"] = ack.PendingAgentWorkflow
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1208,7 +1239,7 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 // captured each runtime's liveness state in a connection lease, so the hot
 // path never reads agent_runtime. HTTP heartbeat remains the stateless lookup
 // fallback for a daemon that stops receiving WebSocket acknowledgements.
-func (h *Handler) HandleDaemonWSHeartbeat(ctx context.Context, identity daemonws.ClientIdentity, runtimeID string, supportsBatchImport bool) (*protocol.DaemonHeartbeatAckPayload, error) {
+func (h *Handler) HandleDaemonWSHeartbeat(ctx context.Context, identity daemonws.ClientIdentity, runtimeID string, supportsBatchImport bool, workflowCapabilities *protocol.AgentWorkflowCapabilities) (*protocol.DaemonHeartbeatAckPayload, error) {
 	lease := identity.RuntimeLeases[runtimeID]
 	if lease == nil {
 		return nil, fmt.Errorf("runtime not in connection lease")
@@ -1228,7 +1259,20 @@ func (h *Handler) HandleDaemonWSHeartbeat(ctx context.Context, identity daemonws
 		}
 		return nil, err
 	}
-	ack, _, err := h.processHeartbeat(ctx, runtimeID, supportsBatchImport)
+	if workflowCapabilities != nil {
+		capabilities, err := json.Marshal(workflowCapabilities)
+		if err != nil {
+			return nil, fmt.Errorf("marshal workflow capabilities: %w", err)
+		}
+		runtimeUUID, err := util.ParseUUID(runtimeID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid runtime_id: %w", err)
+		}
+		if err := h.Queries.UpdateAgentRuntimeWorkflowCapabilities(ctx, db.UpdateAgentRuntimeWorkflowCapabilitiesParams{ID: runtimeUUID, Capabilities: capabilities}); err != nil {
+			return nil, err
+		}
+	}
+	ack, _, err := h.processHeartbeat(ctx, runtimeID, supportsBatchImport, workflowCapabilities)
 	return ack, err
 }
 
@@ -1368,7 +1412,7 @@ type heartbeatMetrics struct {
 // heartbeats using only the runtime ID. Each transport records liveness first:
 // HTTP uses its stateless runtime row, while WebSocket uses the connection
 // lease. Auth and request decoding also remain transport-specific.
-func (h *Handler) processHeartbeat(ctx context.Context, runtimeID string, supportsBatchImport bool) (*protocol.DaemonHeartbeatAckPayload, heartbeatMetrics, error) {
+func (h *Handler) processHeartbeat(ctx context.Context, runtimeID string, supportsBatchImport bool, workflowCapabilities *protocol.AgentWorkflowCapabilities) (*protocol.DaemonHeartbeatAckPayload, heartbeatMetrics, error) {
 	var m heartbeatMetrics
 
 	slog.Debug("daemon heartbeat", "runtime_id", runtimeID)
@@ -1376,7 +1420,7 @@ func (h *Handler) processHeartbeat(ctx context.Context, runtimeID string, suppor
 	ack := &protocol.DaemonHeartbeatAckPayload{
 		RuntimeID:          runtimeID,
 		Status:             "ok",
-		ServerCapabilities: []string{protocol.DaemonCapabilityRPCV1},
+		ServerCapabilities: []string{protocol.DaemonCapabilityRPCV1, protocol.DaemonCapabilityNativeSessionImportV1, protocol.DaemonCapabilityChatControlsV1},
 	}
 
 	probeUpdateCtx, cancelProbeUpdate := context.WithTimeout(ctx, heartbeatHasPendingTimeout)
@@ -1509,6 +1553,20 @@ func (h *Handler) processHeartbeat(ctx context.Context, runtimeID string, suppor
 			slog.Warn("local skill import HasPending timed out", "runtime_id", runtimeID, "elapsed_ms", m.ProbeImportMs)
 		} else {
 			slog.Warn("local skill import HasPending failed", "error", probeErr, "runtime_id", runtimeID)
+		}
+	}
+
+	runtimeUUID, err := util.ParseUUID(runtimeID)
+	if err != nil {
+		return nil, m, fmt.Errorf("invalid runtime_id: %w", err)
+	}
+	if workflowCapabilities != nil {
+		requests, err := h.claimAgentWorkflowRequests(ctx, runtimeUUID, *workflowCapabilities)
+		if err != nil {
+			return nil, m, fmt.Errorf("admit agent workflow requests: %w", err)
+		}
+		for _, request := range requests {
+			ack.PendingAgentWorkflow = append(ack.PendingAgentWorkflow, workflowCommandFromRecord(request))
 		}
 	}
 
@@ -4071,7 +4129,7 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
 
 	// Verify the caller owns this task's workspace.
-	_, workspaceID, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, taskID)
+	currentTask, workspaceID, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, taskID)
 	if !ok {
 		return
 	}
@@ -4080,10 +4138,19 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 		Capabilities []string `json:"capabilities"`
 		RuntimeID    string   `json:"runtime_id"`
 		DispatchedAt string   `json:"dispatched_at"`
+		RunID        string   `json:"run_id"`
 	}
 	if r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+	var runID pgtype.UUID
+	if req.RunID != "" {
+		var valid bool
+		runID, valid = parseUUIDOrBadRequest(w, req.RunID, "run_id")
+		if !valid {
 			return
 		}
 	}
@@ -4094,7 +4161,12 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 	if legacy {
 		// Older daemons send {}. Keep their single-winner behavior; in
 		// particular, they cannot acknowledge an already-running task.
-		task, err = h.TaskService.StartTask(r.Context(), parseUUID(taskID), enableTaskSupplement)
+		if runID.Valid {
+			started, startErr := h.TaskService.StartTaskWithRun(r.Context(), currentTask.ID, runID, enableTaskSupplement)
+			task, err = &started, startErr
+		} else {
+			task, err = h.TaskService.StartTask(r.Context(), currentTask.ID, enableTaskSupplement)
+		}
 	} else {
 		runtimeID, ok := parseUUIDOrBadRequest(w, req.RuntimeID, "runtime_id")
 		if !ok {
@@ -4105,10 +4177,15 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "dispatched_at must be a PostgreSQL claim timestamp")
 			return
 		}
-		task, err = h.TaskService.StartTaskForClaim(r.Context(), db.LockAgentTaskStartClaimParams{
-			ID: parseUUID(taskID), RuntimeID: runtimeID,
+		claim := db.LockAgentTaskStartClaimParams{
+			ID: currentTask.ID, RuntimeID: runtimeID,
 			DispatchedAt: pgtype.Timestamptz{Time: generation, Valid: true},
-		}, enableTaskSupplement)
+		}
+		if runID.Valid {
+			task, err = h.TaskService.StartTaskForClaimWithRun(r.Context(), claim, runID, enableTaskSupplement)
+		} else {
+			task, err = h.TaskService.StartTaskForClaim(r.Context(), claim, enableTaskSupplement)
+		}
 	}
 	if err != nil {
 		slog.Warn("start task failed", "task_id", taskID, "error", err)
@@ -5083,7 +5160,16 @@ type TaskMessageRequest struct {
 }
 
 type TaskMessageBatchRequest struct {
+	BatchID  string               `json:"batch_id,omitempty"`
 	Messages []TaskMessageRequest `json:"messages"`
+}
+
+// TaskMessageCapabilities advertises receipt support only after task authorization.
+func (h *Handler) TaskMessageCapabilities(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, chi.URLParam(r, "taskId")); !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"batch_receipts": true})
 }
 
 // ReportTaskMessages receives a batch of agent execution messages from the daemon.
@@ -5093,6 +5179,11 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 	var req TaskMessageBatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	batchID, batchHash, err := taskMessageBatchIdentity(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if len(req.Messages) == 0 {
@@ -5128,15 +5219,17 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 	// string means SQL NULL, applied by the query's NULLIF.
 	n := len(req.Messages)
 	params := db.CreateTaskMessagesParams{
-		TaskID:   parseUUID(taskID),
-		Ids:      make([]pgtype.UUID, 0, n),
-		Seqs:     make([]int32, 0, n),
-		Types:    make([]string, 0, n),
-		Tools:    make([]string, 0, n),
-		CallIds:  make([]string, 0, n),
-		Contents: make([]string, 0, n),
-		Inputs:   make([]string, 0, n),
-		Outputs:  make([]string, 0, n),
+		TaskID:    task.ID,
+		BatchID:   batchID,
+		BatchHash: batchHash,
+		Ids:       make([]pgtype.UUID, 0, n),
+		Seqs:      make([]int32, 0, n),
+		Types:     make([]string, 0, n),
+		Tools:     make([]string, 0, n),
+		CallIds:   make([]string, 0, n),
+		Contents:  make([]string, 0, n),
+		Inputs:    make([]string, 0, n),
+		Outputs:   make([]string, 0, n),
 		// Optional for mixed-version rollout. Older daemons omit the event
 		// timestamp, and one missing or implausible value makes the whole batch
 		// use database time so paired events never mix clocks.
@@ -5206,8 +5299,12 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 		params.OutputTruncations = append(params.OutputTruncations, boolArrayElement(msg.OutputTruncated))
 	}
 
-	created, err := h.Queries.CreateTaskMessages(r.Context(), params)
+	created, err := h.persistTaskMessageBatch(r.Context(), params)
 	if err != nil {
+		if errors.Is(err, errTaskMessageBatchConflict) {
+			writeError(w, http.StatusConflict, "batch_id already belongs to different messages")
+			return
+		}
 		slog.Error("failed to create task messages", "task_id", taskID, "count", n, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to persist task message")
 		return
@@ -5229,7 +5326,11 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	response := map[string]string{"status": "ok"}
+	if batchID.Valid {
+		response["batch_id"] = uuidToString(batchID)
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // AckTaskCancelled receives the daemon's acknowledgement that it observed a

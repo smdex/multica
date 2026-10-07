@@ -74,6 +74,16 @@ type ExecOptions struct {
 	// HandshakeTimeout; when both are zero Codex uses separate built-in defaults.
 	ThreadHandshakeTimeout time.Duration
 	ResumeSessionID        string // if non-empty, resume a previous agent session
+	// InteractionMode opts into a human-controlled chat execution for providers
+	// that implement it. Empty and "autonomous" preserve the established task
+	// execution behavior; "chat" enables provider-native steering and input
+	// requests where the adapter can prove the transport supports them.
+	InteractionMode string
+	// ResumePolicy controls whether a resume pointer may be replaced with a
+	// fresh provider session. Empty and "allow_fresh" preserve existing task
+	// behavior. "require_native" is used for imported chat history: adapters
+	// must fail a refused resume and every retry must retain that requirement.
+	ResumePolicy string
 	// ResumeExpected records that this task intended to continue a prior
 	// conversation, independent of ResumeSessionID (which a fallback retry may
 	// clear). When it is true but the backend ends up on a fresh thread — the
@@ -161,6 +171,19 @@ type Session struct {
 	// a transient startup window into a user-visible delivery failure. Nil is
 	// fail-closed and means no run-scoped input may be claimed.
 	SupplementReady func() bool
+	// ControlState reports the current foreground turn and which interactive
+	// controls the provider can accept. It is optional for autonomous and
+	// unsupported providers.
+	ControlState func() ControlState
+	// Steer sends text to the active foreground turn without interrupting it.
+	// It is optional when the provider cannot safely steer a live turn.
+	Steer func(context.Context, SteerRequest) (InputDelivery, error)
+	// RespondToInteraction resolves a provider-native approval or question.
+	// It is optional when the provider does not expose interactive requests.
+	RespondToInteraction func(context.Context, InteractionResponse) (InputDelivery, error)
+	// CancelPendingInputs stops accepting interactive input, rejects pending
+	// provider requests, and clears queued steering before normal cancellation.
+	CancelPendingInputs func(context.Context) error
 	// ToolActivity optionally reports backend-owned tool accounting and its last
 	// transition time, independent of the best-effort transcript. Nil uses the
 	// daemon's message-based accounting. The timestamp gives completed tools a
@@ -200,13 +223,15 @@ type Session struct {
 type MessageType string
 
 const (
-	MessageText       MessageType = "text"
-	MessageThinking   MessageType = "thinking"
-	MessageToolUse    MessageType = "tool-use"
-	MessageToolResult MessageType = "tool-result"
-	MessageStatus     MessageType = "status"
-	MessageError      MessageType = "error"
-	MessageLog        MessageType = "log"
+	MessageText         MessageType = "text"
+	MessageThinking     MessageType = "thinking"
+	MessageToolUse      MessageType = "tool-use"
+	MessageToolResult   MessageType = "tool-result"
+	MessageStatus       MessageType = "status"
+	MessageError        MessageType = "error"
+	MessageLog          MessageType = "log"
+	MessageControlState MessageType = "control-state"
+	MessageInteraction  MessageType = "interaction"
 )
 
 // Message is a unified event emitted by an agent during execution.
@@ -220,6 +245,10 @@ type Message struct {
 	Status    string         // agent status string (Status)
 	Level     string         // log level (Log)
 	SessionID string         // backend session id (Status), for early resume-pointer pinning
+	// ControlState and Interaction are provider-control records. They are not
+	// transcript content and consumers must not render them as text or tools.
+	ControlState *ControlState
+	Interaction  *InteractionRequest
 }
 
 // TokenUsage tracks token consumption for a single model.

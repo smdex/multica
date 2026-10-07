@@ -555,6 +555,10 @@ func gcRuntime(ctx context.Context, txStarter runtimeGCTxStarter, queries *db.Qu
 
 	teardown, err := service.TeardownRuntime(ctx, qtx, runtimeID, service.RuntimeTeardownOptions{CancelNonTerminalTasks: false})
 	if err != nil {
+		if errors.Is(err, service.ErrRuntimeHasWorkSources) {
+			result.skipReason = obsmetrics.RuntimeGCSkipWorkSources
+			return result, nil
+		}
 		if errors.Is(err, service.ErrRuntimeNotDrained) {
 			result.skipReason = obsmetrics.RuntimeGCSkipNonTerminalTask
 			return result, nil

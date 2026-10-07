@@ -5,6 +5,7 @@
  */
 
 import "./env";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 
 // `||` (not `??`) so an empty `NEXT_PUBLIC_API_URL=` in .env still falls
@@ -17,6 +18,12 @@ interface TestWorkspace {
   id: string;
   name: string;
   slug: string;
+}
+
+export interface TestAgentWorkflowFixture {
+  workspace: TestWorkspace;
+  agent: { id: string; name: string };
+  runtime: { id: string; daemonId: string; token: string };
 }
 
 export type TestIssueStatus =
@@ -53,6 +60,8 @@ export class TestApiClient {
   private createdIssueIds: string[] = [];
   private createdProjectIds: string[] = [];
   private seededIssueIds: string[] = [];
+  private workflowFixture: TestAgentWorkflowFixture | null = null;
+  private workflowFixtureIdentity: { email: string; slug: string; tokenHash?: string } | null = null;
 
   async login(email: string, name: string) {
     const client = new pg.Client(DATABASE_URL);
@@ -156,6 +165,107 @@ export class TestApiClient {
     }
 
     throw new Error(`Failed to ensure workspace ${slug}: ${res.status} ${res.statusText}`);
+  }
+
+  /**
+   * Creates one test-owned human, workspace, runtime, and agent for the
+   * agent-workflow browser suite. The runtime is deliberately backed by an
+   * mdt_ token so its fake daemon exercises the same authenticated HTTP and
+   * PostgreSQL boundaries as a real daemon, without resolving a local CLI.
+   */
+  async createAgentWorkflowFixture(runId: string): Promise<TestAgentWorkflowFixture> {
+    if (this.workflowFixture) return this.workflowFixture;
+
+    const suffix = `${runId.replace(/[^a-z0-9]/gi, "").toLowerCase().slice(0, 12)}-${randomUUID()}`;
+    const email = `e2e-agent-workflow-${suffix}@multica.invalid`;
+    const slug = `e2e-agent-workflow-${suffix}`.slice(0, 63);
+    this.workflowFixtureIdentity = { email, slug };
+    const client = new pg.Client(DATABASE_URL);
+    await client.connect();
+    try {
+      await this.login(email, "Agent workflow E2E");
+      const user = await client.query<{ id: string }>(
+        `SELECT id::text FROM "user" WHERE email = $1`,
+        [email],
+      );
+      const userId = user.rows[0]?.id;
+      if (!userId) throw new Error(`Cannot resolve agent-workflow fixture user ${email}`);
+      const workspaceResponse = await this.authedFetch("/api/workspaces", {
+        method: "POST",
+        body: JSON.stringify({ name: "Agent workflow E2E", slug }),
+      });
+      if (!workspaceResponse.ok) throw new Error(`create fixture workspace failed: ${workspaceResponse.status}`);
+      const workspace = await workspaceResponse.json() as TestWorkspace;
+      this.setWorkspaceId(workspace.id);
+      this.setWorkspaceSlug(workspace.slug);
+      await this.markUserOnboarded();
+
+      const daemonId = `e2e-agent-workflow-${suffix}`;
+      const token = `mdt_${randomBytes(20).toString("hex")}`;
+      const tokenHash = createHash("sha256").update(token).digest("hex");
+      this.workflowFixtureIdentity.tokenHash = tokenHash;
+      const runtime = await client.query<{ id: string }>(
+        `
+          INSERT INTO agent_runtime (
+            workspace_id, daemon_id, name, runtime_mode, provider, status,
+            device_info, metadata, owner_id, visibility, last_seen_at
+          )
+          VALUES (
+            $1, $2, 'E2E fake Codex daemon', 'local', 'codex', 'online',
+            'Agent workflow acceptance fixture', '{"capabilities":["native-session-import-v1","chat-controls-v1"]}'::jsonb, $3, 'private', now()
+          )
+          RETURNING id::text
+        `,
+        [workspace.id, daemonId, userId],
+      );
+      const runtimeId = runtime.rows[0]?.id;
+      if (!runtimeId) throw new Error("Cannot create agent-workflow fixture runtime");
+
+      await client.query(
+        `
+          INSERT INTO daemon_token (token_hash, workspace_id, daemon_id, expires_at)
+          VALUES ($1, $2, $3, now() + interval '1 hour')
+        `,
+        [tokenHash, workspace.id, daemonId],
+      );
+
+      const agentName = "E2E native-chat agent";
+      const agentResponse = await this.authedFetch("/api/agents", {
+        method: "POST",
+        body: JSON.stringify({
+          name: agentName,
+          description: "Acceptance fixture for native chat import.",
+          instructions: "",
+          runtime_id: runtimeId,
+          runtime_config: { provider: "codex" },
+          permission_mode: "private",
+        }),
+      });
+      if (!agentResponse.ok) {
+        throw new Error(`create agent-workflow fixture agent failed: ${agentResponse.status} ${await agentResponse.text()}`);
+      }
+      const agent = (await agentResponse.json()) as { id: string; name: string };
+      this.workflowFixture = {
+        workspace,
+        agent,
+        runtime: { id: runtimeId, daemonId, token },
+      };
+      return this.workflowFixture;
+    } catch (error) {
+      try {
+        await this.deleteOwnedAgentWorkflowFixture(client);
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "Fixture setup and cleanup failed");
+      }
+      throw error;
+    } finally {
+      await client.end();
+    }
+  }
+
+  /** Sends an authenticated request with the fixture's workspace headers. */
+  async request(path: string, init?: RequestInit): Promise<Response> {
+    return this.authedFetch(path, init);
   }
 
   async markUserOnboarded() {
@@ -404,6 +514,15 @@ export class TestApiClient {
 
   /** Clean up all issues created during this test. */
   async cleanup() {
+    if (this.workflowFixtureIdentity) {
+      const client = new pg.Client(DATABASE_URL);
+      await client.connect();
+      try {
+        await this.deleteOwnedAgentWorkflowFixture(client);
+      } finally {
+        await client.end();
+      }
+    }
     if (this.seededIssueIds.length > 0 && this.workspaceId) {
       const client = new pg.Client(DATABASE_URL);
       await client.connect();
@@ -446,6 +565,36 @@ export class TestApiClient {
       throw new Error("Test API client is not logged in");
     }
     return this.email;
+  }
+
+  private async deleteOwnedAgentWorkflowFixture(client: pg.Client) {
+    const identity = this.workflowFixtureIdentity;
+    if (!identity) return;
+    // Revoke our token even if setup or the application's teardown fails.
+    if (identity.tokenHash) {
+      await client.query(`DELETE FROM daemon_token WHERE token_hash = $1`, [identity.tokenHash]);
+    }
+    // Resolve the unique generated slug even when POST succeeded but its
+    // response was lost. Never adopt or delete another existing workspace.
+    const workspaces = await client.query<{ id: string }>(
+      `SELECT id::text FROM workspace WHERE slug = $1`, [identity.slug],
+    );
+    for (const workspace of workspaces.rows) {
+      const response = await this.authedFetch(`/api/workspaces/${workspace.id}`, { method: "DELETE" });
+      if (!response.ok && response.status !== 404) {
+        throw new Error(`Fixture workspace cleanup failed: ${response.status} ${await response.text()}`);
+      }
+      // No raw workspace DELETE fallback: application teardown owns all
+      // dependencies in this schema without foreign-key cascades.
+      const remaining = await client.query(`SELECT id FROM workspace WHERE id = $1`, [workspace.id]);
+      if (remaining.rowCount) throw new Error(`Fixture workspace still exists: ${workspace.id}`);
+      await client.query(`DELETE FROM member WHERE workspace_id = $1`, [workspace.id]);
+    }
+    await client.query(`DELETE FROM verification_code WHERE email = $1`, [identity.email]);
+    await client.query(`DELETE FROM member WHERE user_id IN (SELECT id FROM "user" WHERE email = $1)`, [identity.email]);
+    await client.query(`DELETE FROM "user" WHERE email = $1`, [identity.email]);
+    this.workflowFixture = null;
+    this.workflowFixtureIdentity = null;
   }
 
   private async authedFetch(path: string, init?: RequestInit) {

@@ -360,6 +360,10 @@ type codexBackend struct {
 	cfg Config
 }
 
+func (*codexBackend) InteractionCapabilities() InteractionCapabilities {
+	return InteractionCapabilities{Steer: true, Approvals: true, Questions: true}
+}
+
 func buildCodexArgs(opts ExecOptions, logger *slog.Logger) []string {
 	args := []string{"app-server", "--listen", "stdio://"}
 	launchArgs := NormalizeCodexLaunchArgs(opts.ExtraArgs, opts.CustomArgs, opts.McpConfig, logger)
@@ -933,36 +937,30 @@ func isCodexBareTomlKey(s string) bool {
 }
 
 func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := validateInteractionOptions(opts); err != nil {
+		return nil, err
+	}
 	firstSession, err := b.executeOnce(ctx, prompt, opts, 1)
 	if err != nil {
 		return nil, err
 	}
 	msgCh := make(chan Message, 256)
 	resCh := make(chan Result, 1)
-	var sessionMu sync.RWMutex
-	currentSession := firstSession
+	controls := newSessionControlRelay(firstSession)
 	supplement := func(supplementCtx context.Context, instruction string) error {
-		sessionMu.RLock()
-		session := currentSession
-		sessionMu.RUnlock()
+		session := controls.current()
 		if session == nil || session.Supplement == nil {
 			return errors.New("codex turn does not accept additional messages")
 		}
 		return session.Supplement(supplementCtx, instruction)
 	}
 	supplementReady := func() bool {
-		sessionMu.RLock()
-		session := currentSession
-		sessionMu.RUnlock()
+		session := controls.current()
 		return session != nil && session.SupplementReady != nil && session.SupplementReady()
 	}
 
 	go func() {
-		defer func() {
-			sessionMu.Lock()
-			currentSession = nil
-			sessionMu.Unlock()
-		}()
+		defer controls.set(nil)
 		defer close(msgCh)
 		defer close(resCh)
 		session := firstSession
@@ -975,9 +973,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 					resCh <- Result{Status: "failed", Error: err.Error()}
 					return
 				}
-				sessionMu.Lock()
-				currentSession = session
-				sessionMu.Unlock()
+				controls.set(session)
 			}
 			// Hold back the leading session-pin status messages until this
 			// attempt proves it made real progress. A retry never continues the
@@ -1018,7 +1014,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			case result.codexStartupRefreshRetrySafe:
 				retryReason = "model_catalog_refresh"
 			}
-			if retryReason == "" || attempt == 2 {
+			if retryReason == "" || attempt == 2 || requiresNativeResume(attemptOpts) {
 				flushHeldPins()
 				resCh <- result
 				return
@@ -1040,6 +1036,11 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 					b.cfg.Logger.Warn("codex retry dropping resume pointer after model catalog refresh failure",
 						"prior_thread_id", attemptOpts.ResumeSessionID,
 					)
+					if requiresNativeResume(attemptOpts) {
+						flushHeldPins()
+						resCh <- result
+						return
+					}
 					attemptOpts.ResumeSessionID = ""
 					attemptOpts.ResumeExpected = true
 				}
@@ -1055,10 +1056,20 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		}
 	}()
 
-	return &Session{Supplement: supplement, SupplementReady: supplementReady, Messages: msgCh, Result: resCh}, nil
+	result := &Session{Supplement: supplement, SupplementReady: supplementReady, Messages: msgCh, Result: resCh}
+	if isChatInteraction(opts) {
+		result.ControlState = controls.controlState
+		result.Steer = controls.steer
+		result.RespondToInteraction = controls.respond
+		result.CancelPendingInputs = controls.cancel
+	}
+	return result, nil
 }
 
 func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts ExecOptions, attempt int) (*Session, error) {
+	if err := validateInteractionOptions(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "codex"
@@ -1219,6 +1230,11 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 	msgCh := make(chan Message, 256)
 	resCh := make(chan Result, 1)
 	semanticActivityCh := make(chan string, 256)
+	controlMessages := newControlMessagePublisher(msgCh)
+	var interactions *interactionController
+	if isChatInteraction(opts) {
+		interactions = newInteractionController(controlMessages.publish, nil)
+	}
 
 	var outputMu sync.Mutex
 	// Result.Output is "final user-facing output selected by the backend"
@@ -1300,12 +1316,51 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 			b.cfg.Logger.Debug("codex semantic activity observed", "activity", description)
 			trySendString(semanticActivityCh, description)
 		},
+		onTurnStarted: func(turnID string) {
+			if interactions != nil {
+				interactions.setState(ControlState{TurnID: turnID, Active: true, CanSteer: true})
+			}
+		},
 		onTurnDone: func(aborted bool) {
+			if interactions != nil {
+				_ = interactions.cancelPendingInputs(context.Background())
+				interactions.setState(ControlState{})
+			}
 			select {
 			case turnDone <- aborted:
 			default:
 			}
 		},
+	}
+	if interactions != nil {
+		interactions.steer = func(ctx context.Context, request SteerRequest) (InputDelivery, error) {
+			result, err := c.request(ctx, "turn/steer", map[string]any{
+				"threadId":            c.getThreadID(),
+				"expectedTurnId":      request.ExpectedTurnID,
+				"clientUserMessageId": request.ID,
+				"input":               codexTurnInput(request.Content, false, false, ""),
+			})
+			if err != nil {
+				if isCodexTransportError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return InputDelivery{State: "unknown", Code: "delivery_unknown"}, err
+				}
+				return InputDelivery{State: "rejected", Code: "provider_rejected"}, nil
+			}
+			var ack struct {
+				TurnID string `json:"turnId"`
+				Turn   struct {
+					ID string `json:"id"`
+				} `json:"turn"`
+			}
+			if err := json.Unmarshal(result, &ack); err != nil {
+				return InputDelivery{State: "unknown", Code: "delivery_unknown"}, nil
+			}
+			if ack.TurnID == request.ExpectedTurnID || ack.Turn.ID == request.ExpectedTurnID {
+				return InputDelivery{State: "accepted"}, nil
+			}
+			return InputDelivery{State: "unknown", Code: "delivery_unknown"}, nil
+		}
+		c.interactions = interactions
 	}
 
 	// Start reading stdout in background
@@ -1491,6 +1546,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		defer cancel()
 		defer stopProcess()
 		defer close(msgCh)
+		defer controlMessages.close()
 		defer close(resCh)
 		defer drainAndWait()
 
@@ -1940,7 +1996,14 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 	supplementReady := func() bool {
 		return c.getThreadID() != "" && c.activeTurnID() != ""
 	}
-	return &Session{Supplement: supplement, SupplementReady: supplementReady, Messages: msgCh, Result: resCh}, nil
+	result := &Session{Supplement: supplement, SupplementReady: supplementReady, Messages: msgCh, Result: resCh}
+	if interactions != nil {
+		result.ControlState = interactions.controlState
+		result.Steer = interactions.steerTurn
+		result.RespondToInteraction = interactions.respondToInteraction
+		result.CancelPendingInputs = interactions.cancelPendingInputs
+	}
+	return result, nil
 }
 
 func supplementCodexTurn(ctx context.Context, c *codexClient, instruction string) error {
@@ -2024,6 +2087,9 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 			// We need the thread ID, not an unbounded single-line turns payload.
 			"excludeTurns": true,
 		}
+		if isChatInteraction(opts) {
+			resumeParams["approvalPolicy"] = "on-request"
+		}
 		// Explicit override of the persisted reasoning effort: without
 		// this, a Codex resume silently reuses whatever level the prior
 		// session was created with, even when the user has flipped the
@@ -2058,8 +2124,14 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 				)
 				return threadID, true, nil
 			}
+			if requiresNativeResume(opts) {
+				return "", false, fmt.Errorf("resume_unavailable: codex thread/resume returned no thread ID")
+			}
 			logger.Warn("codex thread/resume returned no thread ID; falling back to thread/start", "prior_thread_id", priorThreadID)
 		} else {
+			if requiresNativeResume(opts) {
+				return "", false, fmt.Errorf("resume_unavailable: codex thread/resume failed: %w", err)
+			}
 			if isCodexTransportError(err) {
 				logger.Warn("codex thread/resume failed due to transport error; not falling back to thread/start", "prior_thread_id", priorThreadID, "error", err)
 				return "", false, fmt.Errorf("codex thread/resume failed: %w", err)
@@ -2088,6 +2160,9 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		"includeApplyPatchTool":  nil,
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": true,
+	}
+	if isChatInteraction(opts) {
+		startParams["approvalPolicy"] = "on-request"
 	}
 	applyCodexReasoningEffort(startParams, opts.ThinkingLevel)
 	applyCodexServiceTier(startParams, opts.ServiceTier)
@@ -2395,6 +2470,8 @@ type codexClient struct {
 	turnIDMu               sync.RWMutex
 	lastTurnID             string
 	turnID                 string
+	interactions           *interactionController
+	writeMu                sync.Mutex
 	onMessage              func(Message)
 	// onAgentMessageChunk reports whether a text chunk was handed to the
 	// daemon-facing message channel. Raw delta reconciliation advances only on
@@ -2406,6 +2483,7 @@ type codexClient struct {
 	// Result.Output fallbacks must use this callback rather than the last chunk.
 	onAgentMessage     func(text string)
 	onSemanticActivity func(description string)
+	onTurnStarted      func(turnID string)
 	onTurnDone         func(aborted bool)
 	// onFinalAnswer fires only for an agent message the app-server itself
 	// labelled `phase: "final_answer"` — the turn's deliverable, as opposed to
@@ -2554,6 +2632,9 @@ func (c *codexClient) setActiveTurnID(turnID string) {
 	}
 	c.turnID = turnID
 	c.turnIDMu.Unlock()
+	if c.onTurnStarted != nil {
+		c.onTurnStarted(turnID)
+	}
 }
 
 // usageTurnID retains attribution after the turn closes its steering window.
@@ -2716,7 +2797,7 @@ func (c *codexClient) request(ctx context.Context, method string, params any) (j
 		return nil, err
 	}
 	data = append(data, '\n')
-	if _, err := c.stdin.Write(data); err != nil {
+	if err := c.writeFrame(data); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -2765,21 +2846,32 @@ func (c *codexClient) notify(method string) {
 	}
 	data, _ := json.Marshal(msg)
 	data = append(data, '\n')
-	_, _ = c.stdin.Write(data)
+	_ = c.writeFrame(data)
 }
 
 func (c *codexClient) respond(id int, result any) {
+	_ = c.respondWithError(id, result)
+}
+
+func (c *codexClient) respondWithError(id int, result any) error {
 	msg := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
 		"result":  result,
 	}
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
 	data = append(data, '\n')
-	_, _ = c.stdin.Write(data)
+	return c.writeFrame(data)
 }
 
 func (c *codexClient) respondError(id int, code int, message string) {
+	_ = c.respondErrorWithError(id, code, message)
+}
+
+func (c *codexClient) respondErrorWithError(id int, code int, message string) error {
 	msg := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
@@ -2788,9 +2880,19 @@ func (c *codexClient) respondError(id int, code int, message string) {
 			"message": message,
 		},
 	}
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
 	data = append(data, '\n')
-	_, _ = c.stdin.Write(data)
+	return c.writeFrame(data)
+}
+
+func (c *codexClient) writeFrame(data []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, err := c.stdin.Write(data)
+	return err
 }
 
 func (c *codexClient) closeAllPending(err error) {
@@ -2927,6 +3029,10 @@ func (c *codexClient) handleServerRequest(raw map[string]json.RawMessage) {
 
 	var method string
 	_ = json.Unmarshal(raw["method"], &method)
+	if c.interactions != nil {
+		c.handleInteractiveServerRequest(id, method, raw["params"])
+		return
+	}
 
 	// Auto-approve all exec/patch requests in daemon mode
 	switch method {

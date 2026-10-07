@@ -36,6 +36,9 @@ import { NoAgentBanner } from "./components/no-agent-banner";
 import { ArchivedAgentBanner } from "./components/archived-agent-banner";
 import { AgentAccessRevokedBanner } from "./components/agent-access-revoked-banner";
 import { RuntimeRequiredBanner } from "./components/runtime-required-banner";
+import { ChatInteractionMode } from "./components/chat-interaction-mode";
+import { ChatInteractionPanel } from "./components/chat-interaction-panel";
+import { NativeHistoryImportDialog } from "./components/native-history-import-dialog";
 
 /**
  * Chat tab — the first-class two-pane surface (thread list on the left,
@@ -231,6 +234,14 @@ export function ChatPage() {
   const listHeader = (
     <PageHeader>
       <h1 className="flex-1 text-body font-semibold">{t(($) => $.page.title)}</h1>
+      <NativeHistoryImportDialog
+        wsId={c.wsId}
+        agents={c.agents}
+        onImported={(sessionId) => {
+          c.setActiveSession(sessionId);
+          setComposingNew(false);
+        }}
+      />
       {newChatButton}
     </PageHeader>
   );
@@ -262,6 +273,21 @@ export function ChatPage() {
           agent={c.activeAgent}
           onArchive={handleArchive}
         />
+      )}
+      {c.currentSession && c.workflow.canUseChatMode && (
+        <>
+          <ChatInteractionMode
+            mode={c.workflow.interactionMode}
+            disabled={!!c.pendingTaskId}
+            busy={c.workflow.isModeUpdating}
+            onChange={(mode) => void c.workflow.setInteractionMode(mode)}
+          />
+          {c.workflow.modeError && (
+            <p role="alert" className="mx-4 mt-1 text-caption text-destructive">
+              {t(($) => $.workflow.request_failed)}
+            </p>
+          )}
+        </>
       )}
       {c.showSkeleton ? (
         <ChatMessageSkeleton />
@@ -303,6 +329,16 @@ export function ChatPage() {
         />
       )}
 
+      {c.currentSession && (
+        <ChatInteractionPanel
+          wsId={c.wsId}
+          sessionId={c.currentSession.id}
+          controls={c.workflow.controls}
+          capabilities={c.workflow.capabilities}
+          interactions={c.workflow.interactions}
+        />
+      )}
+
       {c.isAgentAccessRevoked ? (
         <AgentAccessRevokedBanner agentName={c.activeAgent?.name} />
       ) : c.noAgent ? (
@@ -328,8 +364,43 @@ export function ChatPage() {
         onClear={c.handleClearQueuedTasks}
       />
 
+      {c.workflow.steerOperation?.status === "pending" || c.workflow.steerOperation?.status === "running" ? (
+        <p role="status" className="px-4 pb-2 text-caption text-muted-foreground">
+          {t(($) => $.workflow.send_now_pending)}
+        </p>
+      ) : null}
+      {c.workflow.steerOperation?.status === "completed" &&
+      c.workflow.steerOperation.result &&
+      "delivery" in c.workflow.steerOperation.result &&
+      c.workflow.steerOperation.result.delivery === "accepted" ? (
+        <p role="status" className="px-4 pb-2 text-caption text-muted-foreground">
+          {t(($) => $.workflow.send_now_accepted)}
+        </p>
+      ) : null}
+      {c.workflow.steerError && (
+        <p role={c.workflow.steerError === "delivery_unknown" ? "status" : "alert"} className="px-4 pb-2 text-caption text-muted-foreground">
+          {c.workflow.steerError === "attachments_unsupported"
+            ? t(($) => $.workflow.send_now_attachments)
+            : c.workflow.steerError === "delivery_rejected"
+              ? t(($) => $.workflow.send_now_rejected)
+              : c.workflow.steerError === "delivery_unknown"
+                ? t(($) => $.workflow.operation_unknown)
+                : t(($) => $.workflow.request_failed)}
+        </p>
+      )}
+
       <ChatInput
         onSend={c.handleSend}
+        onSendNow={c.workflow.handleSendNow}
+        showSendNow={Boolean(c.workflow.capabilities?.controls.steer)}
+        sendNowEnabled={c.workflow.canSendNow}
+        sendNowUnavailableLabel={
+          c.workflow.interactions.some((interaction) =>
+            interaction.status === "pending" || interaction.status === "resolving" || interaction.status === "unknown",
+          )
+            ? t(($) => $.workflow.send_now_waiting)
+            : t(($) => $.workflow.send_now_unavailable)
+        }
         restoreDraftRequest={c.restoreDraftRequest}
         conversationStarterRequest={c.conversationStarterRequest}
         onConversationStarterApplied={c.handleConversationStarterApplied}

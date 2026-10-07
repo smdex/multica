@@ -62,7 +62,15 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           ? "ai.multica.mobile.staging"
           : (process.env.EXPO_BUNDLE_IDENTIFIER_DEV ?? "ai.multica.mobile.dev"),
     },
+    android: {
+      package: isProd
+        ? "ai.multica.mobile"
+        : isStaging
+          ? "ai.multica.mobile.staging"
+          : "ai.multica.mobile.dev",
+    },
     plugins: [
+      ["./plugins/with-android-ndk", { version: "28.2.13676358" }],
       "expo-router",
       "expo-secure-store",
       "@react-native-community/datetimepicker",
@@ -85,6 +93,9 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         {
           ios: {
             buildReactNativeFromSource: true,
+          },
+          android: {
+            usesCleartextTraffic: !isProd && !isStaging,
           },
         },
       ],

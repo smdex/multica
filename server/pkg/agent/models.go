@@ -40,7 +40,7 @@ type Model struct {
 	// Thinking advertises the runtime's reasoning/effort catalog for this
 	// model. nil means the runtime/model has no thinking-level control
 	// (or the daemon couldn't discover one); the UI hides its picker. The
-	// catalog is per-model because Codex's `codex debug models` is itself
+	// catalog is per-model because Codex's `model/list` is itself
 	// per-model and Claude's `--effort` superset has known per-model gaps
 	// (`xhigh` is Opus-only, `max` is session-only). See MUL-2339.
 	Thinking *ModelThinking `json:"thinking,omitempty"`
@@ -112,8 +112,8 @@ type Catalog struct {
 	// walks Models, so keeping these out is what makes an unrunnable model fail
 	// closed everywhere without each lookup having to remember a flag.
 	Unavailable []UnavailableModel
-	// Fallback reports that discovery did not succeed and Models is a static
-	// stand-in rather than the runtime's real catalog.
+	// Fallback reports that live discovery did not succeed and Models is a
+	// bundled or static stand-in rather than the runtime's available catalog.
 	//
 	// Several providers (codebuddy, copilot, cursor, grok) answer a failed
 	// discovery with a baked-in list so the picker still has something to
@@ -193,6 +193,20 @@ const modelCacheTTL = 60 * time.Second
 // subcommand (`ccms start q36`) is enumerated as the CLI it actually runs
 // rather than as the wrapper (GH #7046).
 func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (Catalog, error) {
+	return listModels(ctx, providerType, runtimeCmd, false)
+}
+
+// RefreshModels bypasses the local catalog memo and caches a successful live
+// result. Queued server requests use this so force=true cannot hit a daemon
+// cache; ordinary execution-time capability checks still use ListModels.
+func RefreshModels(ctx context.Context, providerType string, runtimeCmd Command) (Catalog, error) {
+	return listModels(ctx, providerType, runtimeCmd, true)
+}
+
+func listModels(ctx context.Context, providerType string, runtimeCmd Command, refresh bool) (Catalog, error) {
+	cachedDiscovery := func(key string, fn func() (Catalog, error)) (Catalog, error) {
+		return cachedDiscoveryWithRefresh(key, refresh, fn)
+	}
 	// Built-in runtime identities (e.g. "omp") declare their model discovery
 	// strategy in the descriptor. Resolve generically before the protocol-
 	// family switch so no runtime-specific case is needed below. When the
@@ -215,7 +229,7 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 		})
 	case "codex":
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
-			return discoverCodexCatalog(ctx, runtimeCmd), nil
+			return discoverCodexModels(ctx, runtimeCmd), nil
 		})
 	case "antigravity":
 		// agy 1.0.6 added a `--model` flag plus an `agy models` catalog
@@ -518,8 +532,12 @@ func modelHasKnownPrefix(model string) bool {
 // protocol family never share one memo entry when they enumerate different
 // binaries.
 func cachedDiscovery(key string, fn func() (Catalog, error)) (Catalog, error) {
+	return cachedDiscoveryWithRefresh(key, false, fn)
+}
+
+func cachedDiscoveryWithRefresh(key string, refresh bool, fn func() (Catalog, error)) (Catalog, error) {
 	modelCacheMu.Lock()
-	if entry, ok := modelCache[key]; ok && time.Now().Before(entry.expiresAt) {
+	if entry, ok := modelCache[key]; !refresh && ok && time.Now().Before(entry.expiresAt) {
 		out, unavailable := entry.models, entry.unavailable
 		modelCacheMu.Unlock()
 		return Catalog{Models: out, Unavailable: unavailable}, nil
@@ -599,8 +617,8 @@ func claudeStaticModels() []Model {
 	}
 }
 
-// codexStaticModels is the fallback for Codex versions older than 0.122.0
-// and for failed/malformed live and bundled discovery calls. It lists the
+// codexStaticModels is the fallback when app-server discovery fails and
+// bundled discovery is unavailable or malformed. It lists the
 // visible entries of the newest locally verified live catalog — which can run
 // ahead of the bundled one (gpt-6.1-sol was live-only on codex-cli 0.159.0)
 // — plus still-common models from older Codex releases.

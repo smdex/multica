@@ -37,9 +37,9 @@ RETURNING *;
 -- Atomicity is a deliberate side effect, not just a speedup: the per-message
 -- loop this replaces could persist part of a batch and then fail, leaving the
 -- transcript with a prefix of the batch and no way to complete it — the daemon
--- does not retry this endpoint. One statement makes the batch all-or-nothing,
--- which buys consistency; a batch that fails is still lost whole, so closing
--- the gap for real needs a retry plus a (task_id, seq) uniqueness rule.
+-- legacy daemons do not retry this endpoint. Identified batches retain a hash
+-- on their rows and serialize through the task lock to acknowledge retries
+-- without inserting or broadcasting their messages twice.
 --
 -- The ORDER BY is a contract, not decoration. A bare `INSERT ... RETURNING`
 -- has no defined row order, and the caller republishes these rows as realtime
@@ -65,7 +65,7 @@ WITH incoming AS (
         unnest(sqlc.arg('created_ats')::text[]) AS created_at,
         unnest(sqlc.arg('output_truncations')::text[]) AS output_truncated
 ), inserted AS (
-    INSERT INTO task_message (id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id)
+    INSERT INTO task_message (id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id, batch_id, batch_hash)
     SELECT
         m.id,
         sqlc.arg('task_id')::uuid,
@@ -77,11 +77,21 @@ WITH incoming AS (
         NULLIF(m.output, ''),
         COALESCE(NULLIF(m.created_at, '')::timestamptz, now()),
         NULLIF(m.output_truncated, '')::bool,
-        NULLIF(m.call_id, '')
+        NULLIF(m.call_id, ''),
+        sqlc.narg('batch_id')::uuid,
+        sqlc.narg('batch_hash')::text
     FROM incoming AS m
     RETURNING *
 )
 SELECT * FROM inserted ORDER BY seq ASC;
+
+-- name: LockTaskForMessageBatch :one
+SELECT id FROM agent_task_queue WHERE id = $1 FOR UPDATE;
+
+-- name: GetTaskMessageBatchHash :one
+SELECT batch_hash FROM task_message
+WHERE task_id = $1 AND batch_id = $2
+LIMIT 1;
 
 -- name: ListTaskMessages :many
 SELECT * FROM task_message

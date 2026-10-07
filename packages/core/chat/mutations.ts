@@ -3,11 +3,14 @@ import { api } from "../api";
 import { useWorkspaceId } from "../hooks";
 import { chatKeys, sortChatSessions, QUICK_ACTIONS_PENDING_TIMEOUT_MS } from "./queries";
 import { createLogger } from "../logger";
+import { createSafeId } from "../utils";
 import type {
+  ChatInteractionResponse,
   ChatSession,
   ChatPinnedAgent,
   ChatDraftRestoresResponse,
   ChatQuickActionsPendingState,
+  WorkflowRequest,
 } from "../types";
 
 const logger = createLogger("chat.mut");
@@ -106,7 +109,12 @@ export function useCreateChatSession() {
   const wsId = useWorkspaceId();
 
   return useMutation({
-    mutationFn: (data: { agent_id: string; title?: string; project_id?: string | null }) => {
+    mutationFn: (data: {
+      agent_id: string;
+      title?: string;
+      project_id?: string | null;
+      interaction_mode?: "chat" | "autonomous";
+    }) => {
       logger.info("createChatSession.start", {
         agent_id: data.agent_id,
         project_id: data.project_id,
@@ -122,6 +130,137 @@ export function useCreateChatSession() {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+    },
+  });
+}
+
+/** Changes the explicit approval policy only while the server permits it. */
+export function useSetChatSessionInteractionMode() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+
+  return useMutation({
+    mutationFn: ({ sessionId, interactionMode }: {
+      sessionId: string;
+      interactionMode: "chat" | "autonomous";
+    }) => api.updateChatSession(sessionId, { interaction_mode: interactionMode }),
+    onSuccess: (session) => {
+      qc.setQueryData<ChatSession[]>(chatKeys.sessions(wsId), (old) =>
+        old?.map((item) => item.id === session.id ? { ...item, ...session } : item),
+      );
+    },
+    onSettled: (_data, _error, variables) => {
+      qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+      qc.invalidateQueries({ queryKey: chatKeys.controls(wsId, variables.sessionId) });
+    },
+  });
+}
+
+function cacheWorkflowRequest(
+  qc: ReturnType<typeof useQueryClient>,
+  wsId: string,
+  request: WorkflowRequest,
+  runtimeId: string,
+): void {
+  if (!request.id || !runtimeId) return;
+  qc.setQueryData(chatKeys.workflowRequest(wsId, runtimeId, request.id), request);
+}
+
+/** Starts a read-only native-session page request. A click creates one request id; no retry occurs. */
+export function useListNativeSessions() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+  return useMutation({
+    mutationFn: ({ runtimeId, cursor, limit = 20 }: {
+      runtimeId: string;
+      cursor: string | null;
+      limit?: number;
+    }) => api.listNativeSessions(runtimeId, {
+      request_id: createSafeId(),
+      cursor,
+      limit,
+    }),
+    retry: false,
+    onSuccess: (request, variables) => cacheWorkflowRequest(qc, wsId, request, variables.runtimeId),
+  });
+}
+
+/** Starts a server-owned native copy/import. It is never retried by the client. */
+export function useImportNativeSession() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+  return useMutation({
+    mutationFn: ({ runtimeId, sessionRef, revision, agentId }: {
+      runtimeId: string;
+      sessionRef: string;
+      revision: string;
+      agentId: string;
+    }) => api.importNativeSession(runtimeId, {
+      request_id: createSafeId(),
+      session_ref: sessionRef,
+      revision,
+      agent_id: agentId,
+    }),
+    retry: false,
+    onSuccess: (request, variables) => cacheWorkflowRequest(qc, wsId, request, variables.runtimeId),
+  });
+}
+
+/** Sends one explicit steering command to the exact live task/run/turn fence. */
+export function useSteerChatSession() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+  return useMutation({
+    mutationFn: ({ sessionId, requestId, taskId, runId, turnId, content }: {
+      sessionId: string;
+      runtimeId: string;
+      /** Allocated by the caller before POST so it survives a lost acknowledgement. */
+      requestId: string;
+      taskId: string;
+      runId: string;
+      turnId: string;
+      content: string;
+    }) => api.steerChatSession(sessionId, {
+      request_id: requestId,
+      task_id: taskId,
+      run_id: runId,
+      turn_id: turnId,
+      content,
+    }),
+    retry: false,
+    onSuccess: (request, variables) => {
+      cacheWorkflowRequest(qc, wsId, request, variables.runtimeId);
+      qc.invalidateQueries({ queryKey: chatKeys.controls(wsId, variables.sessionId) });
+      qc.invalidateQueries({ queryKey: chatKeys.interactions(wsId, variables.sessionId) });
+    },
+  });
+}
+
+/** Resolves one server-stored interaction. Unknown delivery remains a terminal visible operation. */
+export function useRespondToChatInteraction() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+  return useMutation({
+    mutationFn: ({ sessionId, interactionId, taskId, runId, turnId, response }: {
+      sessionId: string;
+      interactionId: string;
+      runtimeId: string;
+      taskId: string;
+      runId: string;
+      turnId: string;
+      response: ChatInteractionResponse;
+    }) => api.respondToChatInteraction(sessionId, interactionId, {
+      request_id: createSafeId(),
+      task_id: taskId,
+      run_id: runId,
+      turn_id: turnId,
+      response,
+    }),
+    retry: false,
+    onSuccess: (request, variables) => {
+      cacheWorkflowRequest(qc, wsId, request, variables.runtimeId);
+      qc.invalidateQueries({ queryKey: chatKeys.controls(wsId, variables.sessionId) });
+      qc.invalidateQueries({ queryKey: chatKeys.interactions(wsId, variables.sessionId) });
     },
   });
 }

@@ -232,27 +232,11 @@ func claudeThinkingLevels(values []string) []ThinkingLevel {
 
 // ── Codex ────────────────────────────────────────────────────────────
 //
-// `codex debug models` is the structured discovery hook for the live visible
-// model catalog, each model's reasoning catalog, and service tiers. OpenAI
-// added the command in Codex 0.122.0 (openai/codex #18625). Older versions,
-// failed invocations, and malformed/empty payloads use the bundled catalog and
-// then codexStaticModels so the picker remains usable offline.
-//
-// We prefer this over the older config-error probe trick because:
-//   1. It gives us per-model subsets without hand-maintained tables.
-//   2. The schema is structured and has been stable since its 0.122.0 debut.
-//   3. It doesn't pollute stderr with an intentional misconfiguration.
-//
-// The subcommand emits JSON on stdout by default — there is no `--output json`
-// flag (a prior version of this code passed one and silently failed on
-// 0.131.0). The live form matters because Codex can receive new account-visible
-// models without a CLI release; `--bundled` only reflects the binary's compiled
-// snapshot. A failed live refresh falls back to `--bundled`, marked
-// non-authoritative so neither daemon nor server caches pin it after the
-// network recovers.
-//
-// The static fallback deliberately mirrors a recently verified bundled
-// model/thinking catalog. It does not guess service-tier availability.
+// App-server model/list owns live model and reasoning discovery (codex_models.go).
+// `codex debug models --bundled` (0.122.0+) supplies service-tier metadata
+// missing from that API and a degraded catalog if live discovery fails.
+// Bundled and static fallbacks remain non-authoritative and are never cached.
+// The static fallback does not guess service-tier availability.
 
 // codexEffortLabel is the human display string for each Codex effort
 // value, matching Codex's own TUI (`Extra high`, `Minimal`, …) so
@@ -302,52 +286,6 @@ type codexDebugServiceTier struct {
 	Description string `json:"description"`
 }
 
-// discoverCodexCatalog returns the installed Codex binary's live visible
-// catalog, including reasoning metadata. Version detection happens before the
-// debug command so old binaries do not log a predictable "unknown command"
-// failure on every cache refresh.
-func discoverCodexCatalog(ctx context.Context, cmd Command) Catalog {
-	if cmd.Path == "" {
-		cmd.Path = "codex"
-	}
-	version, err := DetectVersion(ctx, cmd)
-	if err != nil {
-		return Catalog{Models: codexStaticModels(), Fallback: true}
-	}
-	supportsExplicitStandard := codexSupportsExplicitStandardServiceTier(version)
-	if !codexSupportsDebugModels(version) {
-		return Catalog{
-			Models:   annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard),
-			Fallback: true,
-		}
-	}
-
-	liveCtx, cancel := context.WithTimeout(ctx, codexLiveCatalogTimeout)
-	raw, err := runCodexDebugModels(liveCtx, cmd, codexDebugModelsArgs...)
-	cancel()
-	if err == nil {
-		models, parseErr := parseCodexModelCatalog(raw)
-		if parseErr == nil && len(models) > 0 {
-			return Catalog{Models: annotateCodexExplicitStandardServiceTier(models, supportsExplicitStandard)}
-		}
-	}
-
-	raw, err = runCodexDebugModels(ctx, cmd, codexBundledDebugModelsArgs...)
-	if err == nil {
-		models, parseErr := parseCodexModelCatalog(raw)
-		if parseErr == nil && len(models) > 0 {
-			return Catalog{
-				Models:   annotateCodexExplicitStandardServiceTier(models, supportsExplicitStandard),
-				Fallback: true,
-			}
-		}
-	}
-	return Catalog{
-		Models:   annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard),
-		Fallback: true,
-	}
-}
-
 func codexSupportsDebugModels(version string) bool {
 	return codexVersionAtLeast(version, minCodexDebugModelsVersion)
 }
@@ -378,17 +316,18 @@ func annotateCodexExplicitStandardServiceTier(models []Model, supported bool) []
 	return models
 }
 
-const codexLiveCatalogTimeout = 15 * time.Second
-
-// codexDebugModelsArgs is the argv we pass for the authoritative live catalog.
-// codexBundledDebugModelsArgs is the offline fallback. Kept as package-level
-// vars so tests can assert the exact form a real `codex` invocation receives.
+// codexDebugModelsArgs pins the explicit debug command's argv.
+// codexBundledDebugModelsArgs is the default used for offline service-tier
+// metadata and fallback models. Live model discovery uses app-server model/list.
 var (
 	codexDebugModelsArgs        = []string{"debug", "models"}
 	codexBundledDebugModelsArgs = []string{"debug", "models", "--bundled"}
 )
 
 func runCodexDebugModels(ctx context.Context, runtimeCmd Command, args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		args = codexBundledDebugModelsArgs
+	}
 	cmd := runtimeCmd.exec(ctx, args...)
 	hideAgentWindow(cmd)
 	return outputOwned(cmd, runtimeCmd.logger)
@@ -829,7 +768,7 @@ func ValidateServiceTierWith(loadCatalog func() (Catalog, error), providerType, 
 		return false, err
 	}
 	// Explicit standard routing is a CLI-version capability, not a per-model
-	// one: discoverCodexCatalog stamps it on every entry, fallback entries
+	// one: discoverCodexModels stamps it on every entry, fallback entries
 	// included, from the installed version alone. Resolve it before the
 	// unverified-catalog pass-through below: an old CLI must never receive
 	// "default" just because discovery failed.

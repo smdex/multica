@@ -87,6 +87,10 @@ import {
   seedAcceptedPendingTask,
 } from "./use-chat-controller";
 import { useChatProjectContextSupport } from "./use-chat-project-context-support";
+import { useChatWorkflow } from "./use-chat-workflow";
+import { ChatInteractionMode } from "./chat-interaction-mode";
+import { ChatInteractionPanel } from "./chat-interaction-panel";
+import { NativeHistoryImportDialog } from "./native-history-import-dialog";
 import { createLogger } from "@multica/core/logger";
 import type { Agent, Attachment, ChatMessage, ChatSession, PendingChatTasksResponse } from "@multica/core/types";
 import { useLocale, useT } from "../../i18n";
@@ -297,6 +301,12 @@ export function ChatWindow() {
   const presenceDetail = useAgentPresenceDetail(wsId, activeAgent?.id);
   const availability =
     presenceDetail === "loading" ? undefined : presenceDetail.availability;
+  const workflow = useChatWorkflow({
+    wsId,
+    session: currentSession ?? null,
+    runtimeId: activeAgent?.runtime_id,
+    visible: isOpen,
+  });
 
   // Mount / unmount logging. ChatWindow lives in DashboardLayout, so this
   // fires on layout mount (login / workspace switch / fresh page load).
@@ -405,6 +415,7 @@ export function ChatWindow() {
             agent_id: activeAgent.id,
             title: titleSeed.slice(0, 50),
             project_id: activeProjectId,
+            ...(workflow.canUseChatMode ? { interaction_mode: "chat" as const } : {}),
           });
           return session.id;
         } finally {
@@ -419,6 +430,7 @@ export function ChatWindow() {
       activeAgent,
       activeProjectId,
       createSession,
+      workflow.canUseChatMode,
       sessions,
       sessionsLoaded,
       qc,
@@ -871,6 +883,11 @@ export function ChatWindow() {
             </TooltipTrigger>
             <TooltipContent side="top">{t(($) => $.window.new_chat_tooltip)}</TooltipContent>
           </Tooltip>
+          <NativeHistoryImportDialog
+            wsId={wsId}
+            agents={agents}
+            onImported={(sessionId) => setActiveSession(sessionId)}
+          />
           <SessionDropdown
             sessions={sessions}
             // Use the full agent list (incl. archived) so historical
@@ -959,6 +976,31 @@ export function ChatWindow() {
         />
       )}
 
+      {currentSession && workflow.canUseChatMode && (
+        <>
+          <ChatInteractionMode
+            mode={workflow.interactionMode}
+            disabled={!!pendingTaskId}
+            busy={workflow.isModeUpdating}
+            onChange={(mode) => void workflow.setInteractionMode(mode)}
+          />
+          {workflow.modeError && (
+            <p role="alert" className="mx-4 mt-1 text-caption text-destructive">
+              {t(($) => $.workflow.request_failed)}
+            </p>
+          )}
+        </>
+      )}
+      {currentSession && (
+        <ChatInteractionPanel
+          wsId={wsId}
+          sessionId={currentSession.id}
+          controls={workflow.controls}
+          capabilities={workflow.capabilities}
+          interactions={workflow.interactions}
+        />
+      )}
+
       {/* Status banner above the input — single mutually-exclusive slot.
        *  Priority: no-agent > offline / unstable. Agent presence is the
        *  hard prerequisite (you can't send anything without one), so it
@@ -993,11 +1035,46 @@ export function ChatWindow() {
         onClear={handleClearQueuedTasks}
       />
 
+      {workflow.steerOperation?.status === "pending" || workflow.steerOperation?.status === "running" ? (
+        <p role="status" className="px-4 pb-2 text-caption text-muted-foreground">
+          {t(($) => $.workflow.send_now_pending)}
+        </p>
+      ) : null}
+      {workflow.steerOperation?.status === "completed" &&
+      workflow.steerOperation.result &&
+      "delivery" in workflow.steerOperation.result &&
+      workflow.steerOperation.result.delivery === "accepted" ? (
+        <p role="status" className="px-4 pb-2 text-caption text-muted-foreground">
+          {t(($) => $.workflow.send_now_accepted)}
+        </p>
+      ) : null}
+      {workflow.steerError && (
+        <p role={workflow.steerError === "delivery_unknown" ? "status" : "alert"} className="px-4 pb-2 text-caption text-muted-foreground">
+          {workflow.steerError === "attachments_unsupported"
+            ? t(($) => $.workflow.send_now_attachments)
+            : workflow.steerError === "delivery_rejected"
+              ? t(($) => $.workflow.send_now_rejected)
+              : workflow.steerError === "delivery_unknown"
+                ? t(($) => $.workflow.operation_unknown)
+                : t(($) => $.workflow.request_failed)}
+        </p>
+      )}
+
       {/* Input — disabled for legacy archived sessions and for sessions whose
        *  agent has been archived (read-only); locked out entirely when there's
        *  no agent (the EmptyState above carries the CTA). */}
       <ChatInput
         onSend={handleSend}
+        onSendNow={workflow.handleSendNow}
+        showSendNow={Boolean(workflow.capabilities?.controls.steer)}
+        sendNowEnabled={workflow.canSendNow}
+        sendNowUnavailableLabel={
+          workflow.interactions.some((interaction) =>
+            interaction.status === "pending" || interaction.status === "resolving" || interaction.status === "unknown",
+          )
+            ? t(($) => $.workflow.send_now_waiting)
+            : t(($) => $.workflow.send_now_unavailable)
+        }
         restoreDraftRequest={restoreDraftRequest}
         conversationStarterRequest={conversationStarterRequest}
         onConversationStarterApplied={handleConversationStarterApplied}

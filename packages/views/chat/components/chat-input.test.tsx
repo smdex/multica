@@ -663,6 +663,44 @@ describe("ChatInput project context", () => {
     expect(screen.queryByRole("button", { name: "Queue message" })).not.toBeInTheDocument();
   });
 
+  it("keeps Queue and Send now as explicit, separate dispatches", async () => {
+    const onSend = vi.fn<ChatInputOnSend>(async () => true);
+    const onSendNow = vi.fn<ChatInputOnSend>(async () => true);
+    renderInput({
+      isRunning: true,
+      allowSubmitWhileRunning: true,
+      onSend,
+      onSendNow,
+      showSendNow: true,
+      sendNowEnabled: true,
+    });
+
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "steer this" } });
+    const queue = screen.getByRole("button", { name: enChat.workflow.queue_action });
+    const sendNow = screen.getByRole("button", { name: enChat.workflow.send_now_action });
+    expect(queue).toBeEnabled();
+    expect(sendNow).toBeEnabled();
+
+    fireEvent.click(sendNow);
+    await waitFor(() => expect(onSendNow).toHaveBeenCalledWith(
+      "steer this",
+      undefined,
+      expect.any(Function),
+      [],
+    ));
+    expect(onSend).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "queue this" } });
+    fireEvent.click(screen.getByRole("button", { name: enChat.workflow.queue_action }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith(
+      "queue this",
+      undefined,
+      expect.any(Function),
+      [],
+    ));
+    expect(onSendNow).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps Stop available while queued content is uploading", async () => {
     let resolveUpload!: (value: UploadResult) => void;
     mockApiUploadFile.mockImplementation(

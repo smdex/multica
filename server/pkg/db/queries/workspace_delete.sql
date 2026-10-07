@@ -426,6 +426,9 @@ deleted_squad_members AS (
 deleted_project_resources AS (
     DELETE FROM project_resource WHERE workspace_id = $1
 ),
+deleted_project_working_copies AS (
+    DELETE FROM project_working_copy WHERE workspace_id = $1
+),
 deleted_autopilot_collaborators AS (
     DELETE FROM autopilot_collaborator
     WHERE autopilot_id IN (SELECT id FROM ws_autopilots)
@@ -523,6 +526,15 @@ SET state = CASE
     next_attempt_at = now(),
     last_error = NULL
 WHERE channel_media_pending_object.workspace_id = $1;
+
+-- name: DeleteWorkspaceTaskInteractions :exec
+-- Workflow records have no foreign keys by design. Remove interactions before
+-- their chat/task roots disappear so pending human responses do not survive.
+DELETE FROM task_interaction WHERE workspace_id = $1;
+
+-- name: DeleteWorkspaceWorkflowRequests :exec
+-- Remove workflow idempotency records before their chat/task roots disappear.
+DELETE FROM agent_workflow_request WHERE workspace_id = $1;
 
 -- name: DeleteWorkspaceChatMessages :exec
 DELETE FROM chat_message

@@ -12,9 +12,10 @@ import {
   useConsumeChatDraftRestore,
   useSetChatSessionArchived,
   useSetChatSessionProject,
+  useSteerChatSession,
 } from "./mutations";
 import { chatKeys } from "./queries";
-import type { ChatSession } from "../types";
+import type { ChatSession, WorkflowRequest } from "../types";
 
 vi.mock("../hooks", () => ({
   useWorkspaceId: () => "ws-1",
@@ -189,6 +190,59 @@ describe("useSetChatSessionProject", () => {
     expect(
       qc.getQueryData<ChatSession[]>(chatKeys.sessions(WS_ID))![0]!.project_id,
     ).toBe("project-1");
+  });
+});
+
+describe("useSteerChatSession", () => {
+  let qc: QueryClient;
+
+  beforeEach(() => {
+    qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  });
+
+  afterEach(() => {
+    qc.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("posts the caller-allocated request id so it can be reconciled after a lost acknowledgement", async () => {
+    const request: WorkflowRequest = {
+      id: "b2817e14-4528-4985-8016-1e379d1f4846",
+      runtime_id: "runtime-1",
+      provider: "codex",
+      kind: "steer",
+      status: "pending",
+      result: null,
+      error: null,
+      created_at: "",
+      updated_at: "",
+    };
+    const steerChatSession = vi.fn().mockResolvedValue(request);
+    setApiInstance({ steerChatSession } as unknown as ApiClient);
+    const { result } = renderHook(() => useSteerChatSession(), {
+      wrapper: createWrapper(qc),
+    });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        sessionId: "session-1",
+        runtimeId: "runtime-1",
+        requestId: request.id,
+        taskId: "task-1",
+        runId: "run-1",
+        turnId: "turn-1",
+        content: "Please focus on the failing test.",
+      });
+    });
+
+    expect(steerChatSession).toHaveBeenCalledWith("session-1", {
+      request_id: request.id,
+      task_id: "task-1",
+      run_id: "run-1",
+      turn_id: "turn-1",
+      content: "Please focus on the failing test.",
+    });
+    expect(qc.getQueryData(chatKeys.workflowRequest(WS_ID, "runtime-1", request.id))).toEqual(request);
   });
 });
 

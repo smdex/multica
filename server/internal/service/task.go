@@ -1806,6 +1806,25 @@ var ErrChatTaskAgentArchived = errors.New("chat task: agent archived")
 // path returns a task row, not this error.
 var ErrChatTaskAgentNoRuntime = errors.New("chat task: agent has no runtime")
 
+// ErrChatTaskRuntimeMismatch signals that an imported native conversation is
+// pinned to a runtime other than the agent's current runtime. Native resumes
+// are provider-runtime specific, so creating the task would leave the daemon
+// to reject an already-persisted turn.
+var ErrChatTaskRuntimeMismatch = errors.New("runtime_mismatch")
+
+// validateImportedChatRuntime pins imported native sessions to the runtime
+// that created their native resume identity. Ordinary chats intentionally keep
+// following the agent across runtime rebinds.
+func validateImportedChatRuntime(session db.ChatSession, agent db.Agent) error {
+	if !session.NativeImportID.Valid {
+		return nil
+	}
+	if !session.RuntimeID.Valid || session.RuntimeID != agent.RuntimeID {
+		return ErrChatTaskRuntimeMismatch
+	}
+	return nil
+}
+
 // ErrChatQuickActionsNoTurn signals that a quick-actions regeneration was asked
 // for a session with no eligible assistant turn to resume from (empty session,
 // or the latest turn is a no_response / failure with nothing to suggest from).
@@ -1918,6 +1937,23 @@ func (s *TaskService) EnqueueChatTask(
 	)
 }
 
+func chatTaskInteractionMode(session db.ChatSession) string {
+	if session.InteractionMode == "chat" {
+		return "chat"
+	}
+	return "autonomous"
+}
+
+func chatTaskResumePolicy(session db.ChatSession) string {
+	// Native provenance is an execution safety boundary, independent of the
+	// currently selected interaction UI. An imported session must never fall
+	// back to a fresh provider conversation after its mode changes.
+	if session.NativeImportID.Valid {
+		return "require_native"
+	}
+	return "allow_fresh"
+}
+
 // EnqueueChannelChatTask creates a channel-owned task for one durable context
 // generation and freezes its external delivery route in the same transaction.
 func (s *TaskService) EnqueueChannelChatTask(
@@ -2026,6 +2062,9 @@ func (s *TaskService) enqueueChatTaskTx(
 	if !agent.RuntimeID.Valid {
 		return db.AgentTaskQueue{}, ErrChatTaskAgentNoRuntime
 	}
+	if err := validateImportedChatRuntime(currentSession, agent); err != nil {
+		return db.AgentTaskQueue{}, err
+	}
 
 	binding, bindingErr := qtx.LockChannelChatSessionBindingForContext(ctx, chatSession.ID)
 	if bindingErr != nil && !errors.Is(bindingErr, pgx.ErrNoRows) {
@@ -2096,6 +2135,8 @@ func (s *TaskService) enqueueChatTaskTx(
 		OriginatorSource:     prepared.attrSource,
 		TriggerEvidenceKind:  prepared.attrEvidenceKind,
 		TriggerEvidenceRefID: chatSession.ID,
+		InteractionMode:      chatTaskInteractionMode(currentSession),
+		ResumePolicy:         chatTaskResumePolicy(currentSession),
 		ChannelContextRevision: pgtype.Int8{
 			Int64: contextRevision, Valid: contextRevision > 0,
 		},
@@ -2373,6 +2414,9 @@ func (s *TaskService) SendDirectChatMessage(
 		if !carrier.RuntimeID.Valid {
 			return ErrChatTaskAgentNoRuntime
 		}
+		if err := validateImportedChatRuntime(currentSession, carrier); err != nil {
+			return err
+		}
 
 		// The database status of every newly-created task is "queued" until a
 		// daemon claims it. Product queue semantics are positional instead: this
@@ -2401,6 +2445,8 @@ func (s *TaskService) SendDirectChatMessage(
 			OriginatorSource:     attrSource,
 			TriggerEvidenceKind:  attrEvidenceKind,
 			TriggerEvidenceRefID: attrEvidenceRef,
+			InteractionMode:      chatTaskInteractionMode(currentSession),
+			ResumePolicy:         chatTaskResumePolicy(currentSession),
 		})
 		if err != nil {
 			return fmt.Errorf("create direct chat task: %w", err)
@@ -4205,6 +4251,16 @@ func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID, supplem
 // cancellation and other start requests. A replay linearizes at the locked read;
 // a cancellation that commits later can still cancel the acknowledged task.
 func (s *TaskService) StartTaskForClaim(ctx context.Context, claim db.LockAgentTaskStartClaimParams, supplementSupport ...bool) (*db.AgentTaskQueue, error) {
+	return s.startTaskForClaim(ctx, claim, pgtype.UUID{}, supplementSupport...)
+}
+
+// StartTaskForClaimWithRun registers a workflow run as part of the same claimed
+// start and capability negotiation. A running replay cannot replace its run.
+func (s *TaskService) StartTaskForClaimWithRun(ctx context.Context, claim db.LockAgentTaskStartClaimParams, runID pgtype.UUID, supplementSupport ...bool) (*db.AgentTaskQueue, error) {
+	return s.startTaskForClaim(ctx, claim, runID, supplementSupport...)
+}
+
+func (s *TaskService) startTaskForClaim(ctx context.Context, claim db.LockAgentTaskStartClaimParams, runID pgtype.UUID, supplementSupport ...bool) (*db.AgentTaskQueue, error) {
 	if !claim.ID.Valid || !claim.RuntimeID.Valid || !claim.DispatchedAt.Valid {
 		return nil, fmt.Errorf("start task: incomplete claim")
 	}
@@ -4214,18 +4270,30 @@ func (s *TaskService) StartTaskForClaim(ctx context.Context, claim db.LockAgentT
 	}
 	defer tx.Rollback(ctx)
 	qtx := s.Queries.WithTx(tx)
+	if err := lockChatSessionForTaskWrite(ctx, qtx, claim.ID); err != nil {
+		return nil, err
+	}
 	task, err := qtx.LockAgentTaskStartClaim(ctx, claim)
 	if err != nil {
 		return nil, fmt.Errorf("lock task start claim: %w", err)
 	}
 	replay := task.Status == "running"
+	if replay && runID.Valid && task.ActiveRunID != runID {
+		return nil, fmt.Errorf("task start run is stale: %w", pgx.ErrNoRows)
+	}
 	if !replay {
 		task, err = qtx.StartAgentTaskWithSupplement(ctx, db.StartAgentTaskWithSupplementParams{
 			TaskID:               task.ID,
 			EnableTaskSupplement: len(supplementSupport) > 0 && supplementSupport[0],
+			ActiveRunID:          runID,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("start claimed task: %w", err)
+		}
+		if runID.Valid {
+			if err := ReconcileTaskWorkflow(ctx, qtx, task.ID); err != nil {
+				return nil, fmt.Errorf("reconcile started task workflow: %w", err)
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -6139,6 +6207,9 @@ const (
 func SettleTerminalTaskState(ctx context.Context, q *db.Queries, tasks ...db.AgentTaskQueue) error {
 	if len(tasks) == 0 {
 		return nil
+	}
+	if err := RetireTaskWorkflow(ctx, q, tasks...); err != nil {
+		return fmt.Errorf("retire terminal task workflow: %w", err)
 	}
 
 	taskIDs := make([]pgtype.UUID, 0, len(tasks))

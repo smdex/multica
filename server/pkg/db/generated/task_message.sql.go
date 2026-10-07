@@ -14,7 +14,7 @@ import (
 const createTaskMessage = `-- name: CreateTaskMessage :one
 INSERT INTO task_message (id, task_id, seq, type, tool, content, input, output, output_truncated, call_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id
+RETURNING id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id, batch_id, batch_hash
 `
 
 type CreateTaskMessageParams struct {
@@ -56,6 +56,8 @@ func (q *Queries) CreateTaskMessage(ctx context.Context, arg CreateTaskMessagePa
 		&i.CreatedAt,
 		&i.OutputTruncated,
 		&i.CallID,
+		&i.BatchID,
+		&i.BatchHash,
 	)
 	return i, err
 }
@@ -79,7 +81,7 @@ WITH incoming AS (
         unnest($9::text[]) AS created_at,
         unnest($10::text[]) AS output_truncated
 ), inserted AS (
-    INSERT INTO task_message (id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id)
+    INSERT INTO task_message (id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id, batch_id, batch_hash)
     SELECT
         m.id,
         $11::uuid,
@@ -91,11 +93,13 @@ WITH incoming AS (
         NULLIF(m.output, ''),
         COALESCE(NULLIF(m.created_at, '')::timestamptz, now()),
         NULLIF(m.output_truncated, '')::bool,
-        NULLIF(m.call_id, '')
+        NULLIF(m.call_id, ''),
+        $12::uuid,
+        $13::text
     FROM incoming AS m
-    RETURNING id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id
+    RETURNING id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id, batch_id, batch_hash
 )
-SELECT id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id FROM inserted ORDER BY seq ASC
+SELECT id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id, batch_id, batch_hash FROM inserted ORDER BY seq ASC
 `
 
 type CreateTaskMessagesParams struct {
@@ -110,6 +114,8 @@ type CreateTaskMessagesParams struct {
 	CreatedAts        []string      `json:"created_ats"`
 	OutputTruncations []string      `json:"output_truncations"`
 	TaskID            pgtype.UUID   `json:"task_id"`
+	BatchID           pgtype.UUID   `json:"batch_id"`
+	BatchHash         pgtype.Text   `json:"batch_hash"`
 }
 
 type CreateTaskMessagesRow struct {
@@ -124,6 +130,8 @@ type CreateTaskMessagesRow struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	OutputTruncated pgtype.Bool        `json:"output_truncated"`
 	CallID          pgtype.Text        `json:"call_id"`
+	BatchID         pgtype.UUID        `json:"batch_id"`
+	BatchHash       pgtype.Text        `json:"batch_hash"`
 }
 
 // Batch variant of CreateTaskMessage: persists a whole daemon-reported batch in
@@ -159,9 +167,9 @@ type CreateTaskMessagesRow struct {
 // Atomicity is a deliberate side effect, not just a speedup: the per-message
 // loop this replaces could persist part of a batch and then fail, leaving the
 // transcript with a prefix of the batch and no way to complete it — the daemon
-// does not retry this endpoint. One statement makes the batch all-or-nothing,
-// which buys consistency; a batch that fails is still lost whole, so closing
-// the gap for real needs a retry plus a (task_id, seq) uniqueness rule.
+// legacy daemons do not retry this endpoint. Identified batches retain a hash
+// on their rows and serialize through the task lock to acknowledge retries
+// without inserting or broadcasting their messages twice.
 //
 // The ORDER BY is a contract, not decoration. A bare `INSERT ... RETURNING`
 // has no defined row order, and the caller republishes these rows as realtime
@@ -182,6 +190,8 @@ func (q *Queries) CreateTaskMessages(ctx context.Context, arg CreateTaskMessages
 		arg.CreatedAts,
 		arg.OutputTruncations,
 		arg.TaskID,
+		arg.BatchID,
+		arg.BatchHash,
 	)
 	if err != nil {
 		return nil, err
@@ -202,6 +212,8 @@ func (q *Queries) CreateTaskMessages(ctx context.Context, arg CreateTaskMessages
 			&i.CreatedAt,
 			&i.OutputTruncated,
 			&i.CallID,
+			&i.BatchID,
+			&i.BatchHash,
 		); err != nil {
 			return nil, err
 		}
@@ -223,8 +235,26 @@ func (q *Queries) DeleteTaskMessages(ctx context.Context, taskID pgtype.UUID) er
 	return err
 }
 
+const getTaskMessageBatchHash = `-- name: GetTaskMessageBatchHash :one
+SELECT batch_hash FROM task_message
+WHERE task_id = $1 AND batch_id = $2
+LIMIT 1
+`
+
+type GetTaskMessageBatchHashParams struct {
+	TaskID  pgtype.UUID `json:"task_id"`
+	BatchID pgtype.UUID `json:"batch_id"`
+}
+
+func (q *Queries) GetTaskMessageBatchHash(ctx context.Context, arg GetTaskMessageBatchHashParams) (pgtype.Text, error) {
+	row := q.db.QueryRow(ctx, getTaskMessageBatchHash, arg.TaskID, arg.BatchID)
+	var batch_hash pgtype.Text
+	err := row.Scan(&batch_hash)
+	return batch_hash, err
+}
+
 const listTaskMessages = `-- name: ListTaskMessages :many
-SELECT id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id FROM task_message
+SELECT id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id, batch_id, batch_hash FROM task_message
 WHERE task_id = $1
 ORDER BY seq ASC
 `
@@ -250,6 +280,8 @@ func (q *Queries) ListTaskMessages(ctx context.Context, taskID pgtype.UUID) ([]T
 			&i.CreatedAt,
 			&i.OutputTruncated,
 			&i.CallID,
+			&i.BatchID,
+			&i.BatchHash,
 		); err != nil {
 			return nil, err
 		}
@@ -262,7 +294,7 @@ func (q *Queries) ListTaskMessages(ctx context.Context, taskID pgtype.UUID) ([]T
 }
 
 const listTaskMessagesSince = `-- name: ListTaskMessagesSince :many
-SELECT id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id FROM task_message
+SELECT id, task_id, seq, type, tool, content, input, output, created_at, output_truncated, call_id, batch_id, batch_hash FROM task_message
 WHERE task_id = $1 AND seq > $2
 ORDER BY seq ASC
 `
@@ -293,6 +325,8 @@ func (q *Queries) ListTaskMessagesSince(ctx context.Context, arg ListTaskMessage
 			&i.CreatedAt,
 			&i.OutputTruncated,
 			&i.CallID,
+			&i.BatchID,
+			&i.BatchHash,
 		); err != nil {
 			return nil, err
 		}
@@ -302,4 +336,15 @@ func (q *Queries) ListTaskMessagesSince(ctx context.Context, arg ListTaskMessage
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockTaskForMessageBatch = `-- name: LockTaskForMessageBatch :one
+SELECT id FROM agent_task_queue WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockTaskForMessageBatch(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockTaskForMessageBatch, id)
+	var id_2 pgtype.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
 }

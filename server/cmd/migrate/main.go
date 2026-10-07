@@ -140,6 +140,17 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"592_issue_work_link_relationship_index":                    "idx_issue_work_link_relationship",
+	"584_work_source_id":                                        "idx_work_source_id",
+	"585_work_source_owner_identity":                            "idx_work_source_owner_identity",
+	"586_issue_work_link_id":                                    "idx_issue_work_link_id",
+	"587_issue_work_link_native":                                "idx_issue_work_link_native",
+	"588_issue_work_link_workspace":                             "idx_issue_work_link_workspace",
+	"582_task_message_batch_receipt_index":                      "task_message_batch_receipt_idx",
+	"575_project_working_copy_project_daemon_state_index":       "idx_project_working_copy_project_daemon_state",
+	"576_project_working_copy_provisioning_request_index":       "idx_project_working_copy_provisioning_request",
+	"579_chat_session_working_copy_index":                       "idx_chat_session_working_copy",
+	"580_agent_task_queue_working_copy_index":                   "idx_agent_task_queue_working_copy",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",
@@ -171,6 +182,14 @@ var concurrentIndexCleanups = map[string]string{
 	"503_channel_reply_delivery_turn_index":                     "idx_channel_reply_delivery_turn",
 	"504_channel_reply_delivery_installation_index":             "idx_channel_reply_delivery_installation",
 	"505_channel_reply_delivery_binding_index":                  "idx_channel_reply_delivery_binding",
+	"565_agent_workflow_import_identity_index":                  "idx_chat_session_native_import_identity",
+	"566_chat_message_input_request_index":                      "idx_chat_message_input_request_id",
+	"567_chat_message_native_import_index":                      "idx_chat_message_native_import_identity",
+	"568_agent_workflow_request_dispatch_index":                 "idx_agent_workflow_request_dispatch",
+	"569_task_interaction_unresolved_index":                     "idx_task_interaction_unresolved",
+	"570_agent_workflow_request_id_index":                       "idx_agent_workflow_request_id",
+	"571_task_interaction_id_index":                             "idx_task_interaction_id",
+	"573_agent_workflow_import_reservation_index":               "idx_agent_workflow_request_native_import_active",
 	"495_issue_to_label_label_id_index":                         "issue_to_label_label_idx",
 	"496_chat_session_agent_id_index":                           "idx_chat_session_agent_id",
 	"497_agent_task_queue_delegated_failure_evidence_index":     "idx_agent_task_queue_delegated_failure_evidence",
@@ -356,6 +375,7 @@ var concurrentIndexCleanups = map[string]string{
 // the retry, while a bare CREATE would stay wedged on "already exists"; both
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
+	"593_drop_issue_work_link_single_issue_index":           "idx_issue_work_link_native",
 	"144_drop_agent_task_queue_chat_pending_v1":             "idx_agent_task_queue_chat_pending",
 	"171_drop_legacy_label_namespace_index":                 "issue_label_workspace_name_lower_idx",
 	"256_drop_agent_task_queue_chat_pending_v2":             "idx_agent_task_queue_chat_pending_v2",

@@ -13,9 +13,36 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+func TestRuntimeGC_KeepsWorkSourceOwner(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+	ctx := context.Background()
+	runtimeID := createRuntimeGCFixtureRuntime(t, ctx, "source-owner")
+	fixtures := testutil.New(testPool, testWorkspaceID, testUserID)
+	sourceID := fixtures.Insert(t, "work_source", testutil.Cols{
+		"id": testutil.Raw("gen_random_uuid()"), "workspace_id": testWorkspaceID,
+		"runtime_id": runtimeID, "daemon_id": "source-owner-gc", "name": "Retained source",
+		"source_handle": "approved-source", "mode": "observe",
+	})
+	result, err := gcRuntime(ctx, testPool, db.New(testPool), parseUUID(runtimeID))
+	if err != nil || result.deleted || result.skipReason != "work_sources" {
+		t.Fatalf("source owner GC: deleted=%t reason=%q err=%v", result.deleted, result.skipReason, err)
+	}
+	var owners int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*) FROM work_source source
+		JOIN agent_runtime runtime ON runtime.id = source.runtime_id
+		WHERE source.id = $1 AND source.workspace_id = $2
+	`, sourceID, testWorkspaceID).Scan(&owners); err != nil || owners != 1 {
+		t.Fatalf("approved source owner retained=%d err=%v, want one", owners, err)
+	}
+}
 
 func TestRuntimeGC_KeepsTerminalTaskHistory(t *testing.T) {
 	if testPool == nil {

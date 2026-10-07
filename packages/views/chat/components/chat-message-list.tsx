@@ -562,7 +562,11 @@ function AssistantMessage({
   /** This turn is Mika's onboarding opening — render starter cards, not chips. */
   showStarterCards?: boolean;
 }) {
-  const canFetchTaskMessages = isTaskMessageTaskId(taskId);
+  // Imported rows carry their settled provider transcript inline. They must not
+  // request a made-up task id or build a second timeline; the same renderer
+  // below receives those events directly.
+  const importedEvents = message?.imported_events;
+  const canFetchTaskMessages = isTaskMessageTaskId(taskId) && !importedEvents;
 
   // Use the shared taskMessagesOptions so this cache entry is the same one
   // seeded by useRealtimeSync during task execution — zero refetch when the
@@ -576,8 +580,8 @@ function AssistantMessage({
   // array reference when a duplicate event arrives, so this recomputes only
   // when a genuinely new message lands.
   const timeline: ChatTimelineItem[] = useMemo(
-    () => transformTimeline(buildTimeline(taskMessages ?? []), transformContent),
-    [taskMessages, transformContent],
+    () => transformTimeline(buildTimeline(importedEvents ?? taskMessages ?? []), transformContent),
+    [importedEvents, taskMessages, transformContent],
   );
 
   // Content is settled once the persisted message exists; until then text is

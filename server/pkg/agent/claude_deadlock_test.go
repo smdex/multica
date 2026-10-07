@@ -68,11 +68,17 @@ func TestMain(m *testing.M) {
 	case "control_request":
 		runFakeClaudeControlRequest()
 		os.Exit(0)
+	case "chat_control_request":
+		runFakeClaudeChatControlRequest()
+		os.Exit(0)
 	case "background_control_request":
 		runFakeClaudeBackgroundControlRequest()
 		os.Exit(0)
 	case "async_launched_tool_result":
 		runFakeClaudeAsyncLaunchedToolResult()
+		os.Exit(0)
+	case "chat_question":
+		runFakeClaudeChatQuestion()
 		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown CLAUDE_FAKE_MODE: %q\n", mode)
@@ -104,6 +110,17 @@ func runFakeClaudeStartupStdoutBurst() {
 }
 
 func runFakeClaudeControlRequest() {
+	runFakeClaudeControlRequestWithContract(false)
+}
+
+func runFakeClaudeChatControlRequest() {
+	runFakeClaudeControlRequestWithContract(true)
+}
+
+func runFakeClaudeControlRequestWithContract(requirePermissionPromptTransport bool) {
+	if requirePermissionPromptTransport {
+		requireClaudeChatPermissionPromptTransport()
+	}
 	reader := bufio.NewReader(os.Stdin)
 	if _, err := reader.ReadString('\n'); err != nil {
 		fmt.Fprintf(os.Stderr, "read prompt: %v\n", err)
@@ -184,6 +201,76 @@ func runFakeClaudeAsyncLaunchedToolResult() {
 	fmt.Println(`{"type":"system","session_id":"sess-async-launched"}`)
 	fmt.Println(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-async","content":{"status":"async_launched","message":"background task launched"}}]}}`)
 	fmt.Println(`{"type":"result","subtype":"success","is_error":false,"session_id":"sess-async-launched","result":"parent turn completed early"}`)
+}
+
+func runFakeClaudeChatQuestion() {
+	requireClaudeChatPermissionPromptTransport()
+	reader := bufio.NewReader(os.Stdin)
+	if _, err := reader.ReadString('\n'); err != nil {
+		fmt.Fprintf(os.Stderr, "read prompt: %v\n", err)
+		os.Exit(51)
+	}
+	fmt.Println(`{"type":"system","session_id":"sess-chat-question"}`)
+	fmt.Println(`{"type":"control_request","request_id":"req-question","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Choose provider","header":"provider","options":[{"label":"Codex"},{"label":"Claude"}],"multiSelect":false}]}}}`)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read question response: %v\n", err)
+		os.Exit(52)
+	}
+	var response struct {
+		Type     string `json:"type"`
+		Response struct {
+			RequestID string `json:"request_id"`
+			Response  struct {
+				Behavior     string         `json:"behavior"`
+				UpdatedInput map[string]any `json:"updatedInput"`
+			} `json:"response"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &response); err != nil {
+		fmt.Fprintf(os.Stderr, "decode question response: %v\n", err)
+		os.Exit(53)
+	}
+	if response.Type != "control_response" || response.Response.RequestID != "req-question" || response.Response.Response.Behavior != "allow" {
+		fmt.Fprintf(os.Stderr, "unexpected question response: %s\n", line)
+		os.Exit(54)
+	}
+	answers, _ := response.Response.Response.UpdatedInput["answers"].(map[string]any)
+	if answers["Choose provider"] != "Codex" {
+		fmt.Fprintf(os.Stderr, "unexpected mapped answers: %s\n", line)
+		os.Exit(55)
+	}
+	fmt.Println(`{"type":"result","subtype":"success","is_error":false,"session_id":"sess-chat-question","result":"answered"}`)
+}
+
+// requireClaudeChatPermissionPromptTransport makes the fake fail before it
+// emits a control request unless the real launch has the SDK-required stdio
+// permission transport and no permission-bypass override survives.
+func requireClaudeChatPermissionPromptTransport() {
+	hasTransport := false
+	for index := 1; index < len(os.Args); index++ {
+		arg := os.Args[index]
+		if arg == "--permission-prompt-tool" {
+			if index+1 >= len(os.Args) || os.Args[index+1] != "stdio" {
+				fmt.Fprintln(os.Stderr, "permission prompt transport is not stdio")
+				os.Exit(57)
+			}
+			hasTransport = true
+		}
+		if strings.HasPrefix(arg, "--permission-prompt-tool=") {
+			fmt.Fprintf(os.Stderr, "unexpected permission prompt override survived: %q\n", arg)
+			os.Exit(57)
+		}
+		if arg == "--dangerously-skip-permissions" || strings.HasPrefix(arg, "--dangerously-skip-permissions=") ||
+			arg == "--allow-dangerously-skip-permissions" || strings.HasPrefix(arg, "--allow-dangerously-skip-permissions=") {
+			fmt.Fprintf(os.Stderr, "unsafe Claude chat permission override survived: %q\n", arg)
+			os.Exit(56)
+		}
+	}
+	if !hasTransport {
+		fmt.Fprintln(os.Stderr, "missing --permission-prompt-tool stdio")
+		os.Exit(57)
+	}
 }
 
 // TestClaudeExecuteDoesNotDeadlockOnStartupStdoutBurst verifies that the

@@ -3,6 +3,31 @@ INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id,
 VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5, sqlc.narg('project_id'), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid()))
 RETURNING *;
 
+-- name: CreateImportedChatSession :one
+-- An import is a fully hydrated first-party chat, not a queued execution. The
+-- owned native resume pointer is supplied only by an authenticated daemon
+-- result after the server has matched it to the stored import request.
+INSERT INTO chat_session (
+    id, workspace_id, agent_id, creator_id, title, runtime_id, session_id,
+    work_dir, explicitly_created_at, interaction_mode, native_import_provider,
+    native_import_id, native_import_revision, native_imported_at
+)
+VALUES (
+    @id, @workspace_id, @agent_id, @creator_id, @title, @runtime_id,
+    @session_id, @work_dir, now(), 'chat', @native_import_provider,
+    @native_import_id, @native_import_revision, now()
+)
+ON CONFLICT DO NOTHING
+RETURNING *;
+
+-- name: GetImportedChatSession :one
+SELECT * FROM chat_session
+WHERE workspace_id = $1
+  AND creator_id = $2
+  AND runtime_id = $3
+  AND native_import_provider = $4
+  AND native_import_id = $5;
+
 -- name: ClearChatSessionProjectByProject :exec
 -- Project references are intentionally soft (no database FK). Keep chat
 -- history while removing the context selection when a project is deleted.
@@ -234,6 +259,22 @@ RETURNING *;
 UPDATE chat_session
 SET project_id = sqlc.narg('project_id')
 WHERE id = sqlc.arg('id') AND workspace_id = sqlc.arg('workspace_id')
+RETURNING *;
+
+-- name: UpdateChatSessionInteractionMode :one
+-- A mode switch only applies to future turns. Refuse it while any queued or
+-- live task could still be executing with the session's previous policy.
+UPDATE chat_session AS session
+SET interaction_mode = @interaction_mode,
+    updated_at = now()
+WHERE session.id = @id
+  AND session.workspace_id = @workspace_id
+  AND NOT EXISTS (
+      SELECT 1
+      FROM agent_task_queue
+      WHERE chat_session_id = session.id
+        AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  )
 RETURNING *;
 
 -- name: UpdateChatSessionTitleIfCurrent :one
@@ -504,6 +545,39 @@ VALUES (
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 )
 RETURNING *;
+
+-- name: CreateImportedChatMessage :one
+-- Historical rows have no task_id: imported events are settled timeline data,
+-- never a fabricated Multica execution. The partial unique index makes a lost
+-- result acknowledgement safe to retry without duplicating transcript rows.
+INSERT INTO chat_message (
+    id, chat_session_id, role, content, created_at, imported_events,
+    native_message_id
+)
+VALUES (
+    @id, @chat_session_id, @role, @content, @created_at,
+    sqlc.narg(imported_events)::jsonb, @native_message_id
+)
+ON CONFLICT DO NOTHING
+RETURNING *;
+
+-- name: CreateSteeringChatMessage :one
+-- A provider-accepted steer is represented once in the existing transcript,
+-- without creating a normal queued task. input_request_id is its idempotency
+-- fence and makes duplicate terminal reports return the canonical row.
+INSERT INTO chat_message (id, chat_session_id, role, content, input_request_id)
+VALUES (@id, @chat_session_id, 'user', @content, @input_request_id)
+ON CONFLICT DO NOTHING
+RETURNING *;
+
+-- name: GetChatMessageByInputRequestID :one
+SELECT * FROM chat_message
+WHERE input_request_id = $1;
+
+-- name: SetImportedChatSessionLastReadAt :exec
+UPDATE chat_session
+SET last_read_at = GREATEST(last_read_at, $2)
+WHERE id = $1;
 
 -- name: TaskHasChannelIngestedMessages :one
 -- Immutable channel provenance for a task's user-message input batch:
@@ -1136,7 +1210,7 @@ INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, chat_session_id,
     initiator_user_id, originator_user_id, accountable_user_id, force_fresh_session, runtime_mcp_overlay,
     runtime_connected_apps, originator_source, trigger_evidence_kind, trigger_evidence_ref_id,
-    fire_at, channel_context_revision, id
+    fire_at, channel_context_revision, interaction_mode, resume_policy, id
 )
 SELECT
     $1, $2, NULL,
@@ -1152,6 +1226,8 @@ SELECT
     sqlc.narg(trigger_evidence_ref_id),
     sqlc.narg('fire_at')::timestamptz,
     sqlc.narg('channel_context_revision')::bigint,
+    sqlc.arg(interaction_mode),
+    sqlc.arg(resume_policy),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 WHERE lock_task_owner_rows($1, NULL, $2)
 RETURNING *;

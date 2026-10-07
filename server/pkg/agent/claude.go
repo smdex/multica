@@ -39,7 +39,14 @@ type claudeBackend struct {
 	cfg Config
 }
 
+func (*claudeBackend) InteractionCapabilities() InteractionCapabilities {
+	return InteractionCapabilities{Approvals: true, Questions: true}
+}
+
 func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := validateInteractionOptions(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "claude"
@@ -75,7 +82,13 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		}
 	}()
 
-	cmd := b.cfg.commandAt(execPath).exec(runCtx, args...)
+	command := b.cfg.commandAt(execPath)
+	if isChatInteraction(opts) {
+		command = command.withFilteredPrefix(func(prefix []string) []string {
+			return filterClaudeChatPermissionArgs(prefix, b.cfg.Logger)
+		})
+	}
+	cmd := command.exec(runCtx, args...)
 	hideAgentWindow(cmd)
 	// Take over context cancellation: the default kills the whole group the
 	// instant runCtx is done. We instead drive a graceful group-wide
@@ -147,6 +160,22 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 
 	msgCh := make(chan Message, 256)
 	resCh := make(chan Result, 1)
+	var controlMessages *controlMessagePublisher
+	var interactions *interactionController
+	if isChatInteraction(opts) {
+		controlMessages = newControlMessagePublisher(msgCh)
+		interactions = newInteractionController(controlMessages.publish, nil)
+	}
+	// All prompt, supplement hook, and permission frames share inputWriter's lock.
+	controlledStdin := &claudeControlWriter{writer: inputWriter}
+	if interactions != nil {
+		controlledStdin.startDenials(func() {
+			interactions.failClosedForControlOverflow()
+			closeStdin()
+			cancel()
+		})
+	}
+	chatTurnID := newInteractionTurnID()
 
 	// procDone closes once cmd.Wait() returns, letting the cancellation handler
 	// skip a process that already exited and avoid signalling a dead/reused pid.
@@ -169,12 +198,12 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	writeDone := make(chan error, 1)
 	go func() {
 		if supplements != nil {
-			if initErr := supplements.initialize(inputWriter, claudeSupplementHandshakeTimeout); initErr != nil {
+			if initErr := supplements.initialize(controlledStdin, claudeSupplementHandshakeTimeout); initErr != nil {
 				b.cfg.Logger.Warn("Claude additional messages unavailable; continuing normally", "error", initErr)
 				supplements.end()
 			}
 		}
-		err := writeClaudeInput(inputWriter, prompt)
+		err := writeClaudeInput(controlledStdin, prompt)
 		if err != nil {
 			closeStdin()
 			if supplements != nil {
@@ -187,6 +216,15 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	go func() {
 		defer cancel()
 		defer close(msgCh)
+		if interactions != nil {
+			defer func() {
+				closeStdin()
+				controlledStdin.stopDenials()
+			}()
+		}
+		if controlMessages != nil {
+			defer controlMessages.close()
+		}
 		defer close(resCh)
 		if mcpConfigPath != "" {
 			defer cleanupMcpConfigTemp(mcpConfigPath)
@@ -275,6 +313,9 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 				if msg.SessionID != "" {
 					sessionID = msg.SessionID
 				}
+				if interactions != nil {
+					interactions.setState(ControlState{TurnID: chatTurnID, Active: true})
+				}
 				trySend(msgCh, Message{Type: MessageStatus, Status: "running", SessionID: sessionID})
 			case "result":
 				sawResult = true
@@ -292,6 +333,10 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 					lastUsageResult = &usageMsg
 				}
 				closeStdin()
+				if interactions != nil {
+					_ = interactions.cancelPendingInputs(context.Background())
+					interactions.setState(ControlState{})
+				}
 			case "log":
 				if msg.Log != nil {
 					trySend(msgCh, Message{
@@ -305,14 +350,18 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 				if supplements != nil {
 					reply, _ = supplements.prepareHook(msg)
 				}
+				if reply == nil && interactions != nil {
+					b.handleInteractiveControlRequest(msg, controlledStdin, interactions, chatTurnID)
+					continue
+				}
 				controlWrites.Add(1)
 				go func(msg claudeSDKMessage, reply func(io.Writer) error) {
 					defer controlWrites.Done()
 					if reply == nil {
-						b.handleControlRequest(msg, inputWriter)
+						b.handleControlRequest(msg, controlledStdin)
 						return
 					}
-					if err := reply(inputWriter); err != nil {
+					if err := reply(controlledStdin); err != nil {
 						select {
 						case controlErrors <- err:
 						default:
@@ -455,6 +504,11 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	if supplements != nil {
 		session.Supplement = supplements.supplement
 		session.SupplementReady = supplements.ready
+	}
+	if interactions != nil {
+		session.ControlState = interactions.controlState
+		session.RespondToInteraction = interactions.respondToInteraction
+		session.CancelPendingInputs = interactions.cancelPendingInputs
 	}
 	return session, nil
 }
@@ -1075,20 +1129,34 @@ var claudeBlockedArgs = map[string]blockedArgMode{
 	"--effort": blockedWithValue,
 }
 
+// claudeChatPermissionBlockedArgs contains permission controls that would
+// bypass the chat UI or replace the daemon-owned stdin prompt transport. They
+// are deliberately chat-only: autonomous task execution retains its existing
+// configurable invocation behavior.
+var claudeChatPermissionBlockedArgs = map[string]blockedArgMode{
+	"--permission-mode":                    blockedWithValue,
+	"--permission-prompt-tool":             blockedWithValue,
+	"--dangerously-skip-permissions":       blockedStandalone,
+	"--allow-dangerously-skip-permissions": blockedStandalone,
+}
+
 func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
-		"--permission-mode", "bypassPermissions",
-		// AskUserQuestion is Claude Code's built-in interactive question tool.
-		// The daemon runs Claude in non-interactive stream-json mode and has
-		// no UI for the prompt to render in, so a call returns an empty
-		// answer and the agent ends up "inferring" silently — the user
-		// never sees the question (see GitHub #2588). User-facing
-		// clarification belongs in an issue comment instead.
-		"--disallowedTools", "AskUserQuestion",
+		"--permission-mode", claudePermissionMode(opts),
+	}
+	if isChatInteraction(opts) {
+		// The Claude Agent SDK appends this transport when canUseTool is
+		// configured. Without it a prompt request is treated as an implicit
+		// denial instead of arriving on the stream-json control channel.
+		args = append(args, "--permission-prompt-tool", "stdio")
+	} else {
+		// AskUserQuestion belongs to the chat UI; autonomous daemon tasks retain
+		// their established no-prompt contract.
+		args = append(args, "--disallowedTools", "AskUserQuestion")
 	}
 	if hasManagedMcpConfig(opts.McpConfig) {
 		// A saved agent-level config is authoritative, including an explicitly
@@ -1117,14 +1185,22 @@ func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
 		args = append(args, "--resume", opts.ResumeSessionID)
 	}
 	blockedArgs := claudeBlockedArgs
-	if opts.ClaudeSettingsPath != "" {
-		// The daemon-owned --settings file is the enforcement layer for disabled
-		// inherited skills. Drop competing per-agent/default flags only while that
-		// policy is active, then append the managed file last.
+	if opts.ClaudeSettingsPath != "" || isChatInteraction(opts) {
+		// Chat adds daemon-owned permission controls, while a daemon-owned
+		// --settings file excludes competing per-agent/default settings. Clone
+		// the shared autonomous blocklist before adding either execution-specific
+		// policy.
 		blockedArgs = make(map[string]blockedArgMode, len(claudeBlockedArgs)+1)
 		for key, mode := range claudeBlockedArgs {
 			blockedArgs[key] = mode
 		}
+		if isChatInteraction(opts) {
+			for key, mode := range claudeChatPermissionBlockedArgs {
+				blockedArgs[key] = mode
+			}
+		}
+	}
+	if opts.ClaudeSettingsPath != "" {
 		blockedArgs["--settings"] = blockedWithValue
 	}
 	args = append(args, filterCustomArgs(opts.ExtraArgs, blockedArgs, logger)...)
@@ -1133,6 +1209,20 @@ func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
 		args = append(args, "--settings", opts.ClaudeSettingsPath)
 	}
 	return args
+}
+
+// filterClaudeChatPermissionArgs applies the chat-only blocklist to a launch
+// prefix. Prefixes are normally filtered at backend construction, but chat
+// controls are execution-specific and must not alter autonomous invocations.
+func filterClaudeChatPermissionArgs(args []string, logger *slog.Logger) []string {
+	return filterCustomArgs(args, claudeChatPermissionBlockedArgs, logger)
+}
+
+func claudePermissionMode(opts ExecOptions) string {
+	if isChatInteraction(opts) {
+		return "default"
+	}
+	return "bypassPermissions"
 }
 
 func writeClaudeInput(w io.Writer, prompt string) error {

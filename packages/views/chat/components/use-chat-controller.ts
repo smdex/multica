@@ -43,6 +43,7 @@ import {
 import { useChatDraftRestore } from "./use-chat-draft-restore";
 import { useChatTaskActions } from "./use-chat-task-actions";
 import { useChatProjectContextSupport } from "./use-chat-project-context-support";
+import { useChatWorkflow } from "./use-chat-workflow";
 import { createLogger } from "@multica/core/logger";
 import type {
   Agent,
@@ -390,6 +391,12 @@ export function useChatController(opts?: { isActive?: boolean }) {
   const presenceDetail = useAgentPresenceDetail(wsId, activeAgent?.id);
   const availability =
     presenceDetail === "loading" ? undefined : presenceDetail.availability;
+  const workflow = useChatWorkflow({
+    wsId,
+    session: currentSession ?? null,
+    runtimeId: activeAgent?.runtime_id,
+    visible: isActive,
+  });
 
   // Auto mark-as-read whenever the user is actively looking at a session with
   // unread state. `isActive` lets the caller say "my surface is on screen":
@@ -450,6 +457,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
             agent_id: activeAgent.id,
             title: deriveChatTitle(titleSeed),
             project_id: activeProjectId,
+            ...(workflow.canUseChatMode ? { interaction_mode: "chat" as const } : {}),
           });
           return session.id;
         } finally {
@@ -464,6 +472,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
       activeAgent,
       activeProjectId,
       createSession,
+      workflow.canUseChatMode,
       sessions,
       sessionsLoaded,
       qc,
@@ -854,6 +863,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
     customizeConversationStartersHref,
     noAgent,
     availability,
+    workflow,
     // messages
     messages,
     pendingTask,

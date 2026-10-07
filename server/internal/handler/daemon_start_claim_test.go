@@ -170,6 +170,8 @@ func TestStartClaimInvalidBodiesAndLegacy(t *testing.T) {
 		map[string]string{"dispatched_at": generation.Format(time.RFC3339Nano)},
 		map[string]string{"runtime_id": "invalid", "dispatched_at": generation.Format(time.RFC3339Nano)},
 		map[string]string{"runtime_id": runtimeID, "dispatched_at": generation.Add(time.Nanosecond).Format(time.RFC3339Nano)},
+		map[string]string{"run_id": "invalid"},
+		map[string]string{"runtime_id": runtimeID, "dispatched_at": generation.Format(time.RFC3339Nano), "run_id": "invalid"},
 	} {
 		req := withURLParam(newDaemonTokenRequest("POST", "/start", body, testWorkspaceID, "legacy-test"), "taskId", id)
 		testutil.Call(t, testHandler.StartTask, req).Want(http.StatusBadRequest)

@@ -212,6 +212,7 @@ func TestBusinessMetricsRuntimeGC(t *testing.T) {
 	m.RecordRuntimeGCDeleted()
 	m.RecordRuntimeGCFailed()
 	m.RecordRuntimeGCSkipped(RuntimeGCSkipNonTerminalTask)
+	m.RecordRuntimeGCSkipped(RuntimeGCSkipWorkSources)
 
 	if got := testutil.ToFloat64(m.runtimeGCDeleted); got != 1 {
 		t.Fatalf("runtime GC deleted = %v, want 1", got)
@@ -221,6 +222,9 @@ func TestBusinessMetricsRuntimeGC(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.runtimeGCSkipped.WithLabelValues(RuntimeGCSkipNonTerminalTask)); got != 1 {
 		t.Fatalf("runtime GC skipped = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.runtimeGCSkipped.WithLabelValues(RuntimeGCSkipWorkSources)); got != 1 {
+		t.Fatalf("source-owned runtime GC skipped = %v, want 1", got)
 	}
 }
 

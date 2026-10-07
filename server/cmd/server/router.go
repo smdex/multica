@@ -446,6 +446,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		ServerVersion:            normalizeServerVersion(version),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
+	workSources := &handler.WorkSourceHandler{Handler: h, WorkSources: service.NewWorkSourceService(queries, pool)}
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
 	invitationRateLimits.Actor.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_ACTOR_10M", invitationRateLimits.Actor.Limit)
 	invitationRateLimits.Workspace.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_WORKSPACE_24H", invitationRateLimits.Workspace.Limit)
@@ -1584,6 +1585,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/runtimes/{runtimeId}/models/{requestId}/result", h.ReportModelListResult)
 		r.Post("/runtimes/{runtimeId}/local-skills/{requestId}/result", h.ReportLocalSkillListResult)
 		r.Post("/runtimes/{runtimeId}/local-skills/import/{requestId}/result", h.ReportLocalSkillImportResult)
+		r.Post("/runtimes/{runtimeId}/agent-workflow-requests/{requestId}/result", h.ReportAgentWorkflowResult)
+		r.Post("/tasks/{taskId}/controls", h.ReportTaskControls)
+		r.Post("/tasks/{taskId}/interactions", h.ReportTaskInteraction)
 
 		r.Get("/tasks/{taskId}/status", h.GetTaskStatus)
 		r.Post("/tasks/{taskId}/start", h.StartTask)
@@ -1595,6 +1599,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/tasks/{taskId}/fail", h.FailTask)
 		r.Post("/tasks/{taskId}/usage", h.ReportTaskUsage)
 		r.Post("/tasks/{taskId}/messages", h.ReportTaskMessages)
+		r.Get("/tasks/{taskId}/messages/capabilities", h.TaskMessageCapabilities)
 		r.Get("/tasks/{taskId}/messages", h.ListTaskMessages)
 		r.Post("/tasks/{taskId}/cancel-ack", h.AckTaskCancelled)
 
@@ -1639,6 +1644,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(queries, patCache, cloudPATVerifier, cfSigner))
 		r.Use(middleware.RefreshCloudFrontCookies(cfSigner))
+		r.Get("/api/work-sources", workSources.ListWorkSources)
+		r.Post("/api/work-sources", workSources.CreateWorkSource)
+		r.Patch("/api/work-sources/{sourceID}", workSources.UpdateWorkSource)
+		r.Delete("/api/work-sources/{sourceID}", workSources.DeleteWorkSource)
+		r.Get("/api/issue-work-links", workSources.ListIssueWorkLinks)
+		r.Post("/api/issue-work-links", workSources.CreateIssueWorkLink)
+		r.Delete("/api/issue-work-links/{linkID}", workSources.DeleteIssueWorkLink)
 
 		// Plugin Action API. Called by the HOST PAGE on the signed-in user's
 		// session after a surface asks for something over the postMessage
@@ -2324,6 +2336,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Route("/api/runtimes", func(r chi.Router) {
 				r.Get("/", h.ListAgentRuntimes)
 				r.Route("/{runtimeId}", func(r chi.Router) {
+					r.With(handler.RequireHumanActor).Get("/agent-workflow-capabilities", h.GetAgentWorkflowCapabilities)
+					r.With(handler.RequireHumanActor).Post("/native-sessions/list", h.InitiateNativeSessionList)
+					r.With(handler.RequireHumanActor).Post("/native-sessions/import", h.InitiateNativeSessionImport)
+					r.With(handler.RequireHumanActor).Get("/agent-workflow-requests/{requestId}", h.GetAgentWorkflowRequest)
 					r.Patch("/", h.UpdateAgentRuntime)
 					r.Get("/usage", h.GetRuntimeUsage)
 					r.Get("/usage/by-agent", h.GetRuntimeUsageByAgent)
@@ -2418,6 +2434,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/draft-restores", h.ListChatDraftRestores)
 					r.Delete("/draft-restores/{restoreId}", h.ConsumeChatDraftRestore)
 				})
+			})
+
+			// New workflow clients use this public spelling. Do not alias it to
+			// the older /api/chat/sessions transcript route.
+			r.Route("/api/chat-sessions/{sessionId}", func(r chi.Router) {
+				r.With(handler.RequireHumanActor).Get("/controls", h.GetChatControls)
+				r.With(handler.RequireHumanActor).Post("/steer", h.InitiateChatSteer)
+				r.With(handler.RequireHumanActor).Get("/interactions", h.ListChatInteractions)
+				r.With(handler.RequireHumanActor).Post("/interactions/{interactionId}/respond", h.RespondChatInteraction)
 			})
 			r.Get("/api/chat/pending-tasks", h.ListPendingChatTasks)
 			r.Get("/api/chat/pending-tasks/has-any", h.HasPendingChatTasks)

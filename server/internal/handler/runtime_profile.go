@@ -568,6 +568,10 @@ func (h *Handler) DeleteRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 	for _, rid := range runtimeIDs {
 		teardown, err := service.TeardownRuntime(r.Context(), qtx, rid, service.RuntimeTeardownOptions{CancelNonTerminalTasks: true})
 		if err != nil {
+			if errors.Is(err, service.ErrRuntimeHasWorkSources) {
+				writeError(w, http.StatusConflict, "remove this profile's work source bindings before deleting it")
+				return
+			}
 			if errors.Is(err, service.ErrRuntimeNotDrained) {
 				slog.Error("runtime profile delete aborted: tasks not drained",
 					"runtime_id", uuidToString(rid), "profile_id", uuidToString(profileUUID), "error", err)

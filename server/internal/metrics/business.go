@@ -27,6 +27,7 @@ const (
 	RuntimeGCSkipEligibilityChanged = "eligibility_changed"
 	RuntimeGCSkipNonTerminalTask    = "non_terminal_task"
 	RuntimeGCSkipWorkspaceMismatch  = "workspace_mismatch"
+	RuntimeGCSkipWorkSources        = "work_sources"
 )
 
 type activeTaskLabels struct {
@@ -301,7 +302,7 @@ func NewBusinessMetrics() *BusinessMetrics {
 		events:      newBusinessEventMetrics(),
 	}
 	m.prewarmFailureReasons()
-	for _, reason := range []string{RuntimeGCSkipEligibilityChanged, RuntimeGCSkipNonTerminalTask, RuntimeGCSkipWorkspaceMismatch} {
+	for _, reason := range []string{RuntimeGCSkipEligibilityChanged, RuntimeGCSkipNonTerminalTask, RuntimeGCSkipWorkspaceMismatch, RuntimeGCSkipWorkSources} {
 		m.runtimeGCSkipped.WithLabelValues(reason).Add(0)
 	}
 	// Prewarm the full source x result grid (45 series) so a source that has
@@ -465,7 +466,7 @@ func (m *BusinessMetrics) RecordRuntimeGCSkipped(reason string) {
 
 func normalizeRuntimeGCSkipReason(reason string) string {
 	switch reason {
-	case RuntimeGCSkipEligibilityChanged, RuntimeGCSkipNonTerminalTask, RuntimeGCSkipWorkspaceMismatch:
+	case RuntimeGCSkipEligibilityChanged, RuntimeGCSkipNonTerminalTask, RuntimeGCSkipWorkspaceMismatch, RuntimeGCSkipWorkSources:
 		return reason
 	default:
 		return "unknown"

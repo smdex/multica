@@ -1,8 +1,41 @@
-# Multica Mobile (iOS)
+# Multica Mobile
 
-Expo + React Native iOS client for Multica. Independent from web/desktop — shares types and pure utilities from `@multica/core/`. See [`AGENTS.md`](./AGENTS.md) for mobile architecture and development rules; `package.json` records the current dependency versions.
+Expo + React Native mobile client for Multica. Independent from web/desktop — shares types and pure utilities from `@multica/core/`. See [`AGENTS.md`](./AGENTS.md) for mobile architecture and development rules; `package.json` records the current dependency versions.
 
-## Just want to use it on your phone? (no development)
+## Android standalone development build
+
+The repository's `devenv` includes a pinned SDK from
+[`tadfisher/android-nixpkgs`](https://github.com/tadfisher/android-nixpkgs),
+Java, and ADB. Connect your phone with USB debugging or pair/connect wireless
+ADB first. Set `EXPO_PUBLIC_API_URL` in `.env.development.local` to the API's
+VPN/LAN URL, not `localhost`.
+
+From the repository root:
+
+```bash
+devenv shell -- bash -c '
+  set -e
+  cd apps/mobile
+  pnpm exec dotenv -e .env.development.local -- bash -c "
+    set -e
+    export APP_ENV=development NODE_ENV=production
+    pnpm exec expo prebuild --platform android --no-install
+    cd android
+    ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+    adb install -r app/build/outputs/apk/release/app-release.apk
+    adb shell am start -n ai.multica.mobile.dev/.MainActivity
+  "
+'
+```
+
+This produces a locally signed, standalone **Multica (Dev)** app with embedded
+JavaScript; Metro is not required. Rebuild to pick up JS or API URL changes.
+The command targets ARM64 phones; change `reactNativeArchitectures` for other
+devices. With multiple devices, pass `adb -s <serial>` explicitly.
+Generated `android/` files stay ignored. Only the development variant allows
+cleartext HTTP for a local backend; staging and production require HTTPS.
+
+## Just want to use it on your iPhone? (no development)
 
 Multica isn't on the App Store yet — until that changes, anyone who wants it on their iPhone builds from source. One command:
 

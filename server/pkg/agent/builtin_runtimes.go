@@ -182,6 +182,17 @@ func NewRuntime(runtimeID string, cfg Config) (Backend, error) {
 		return nil, fmt.Errorf("runtime %q: protocol family %q backend %T does not support runtime overrides", runtimeID, desc.ProtocolFamily, backend)
 	}
 	applicator.applyBuiltinRuntimeOverrides(desc)
+	// OMP currently shares Pi's autonomous event stream only. Keep its
+	// delegate named rather than embedded so Pi's native-history and chat
+	// capability interfaces are not accidentally promoted before OMP has a
+	// separately verified contract for either surface.
+	if desc.ID == "omp" {
+		pi, ok := backend.(*piBackend)
+		if !ok {
+			return nil, fmt.Errorf("runtime %q: protocol family %q backend %T is not a Pi executor", runtimeID, desc.ProtocolFamily, backend)
+		}
+		return &ompBackend{delegate: pi}, nil
+	}
 	return backend, nil
 }
 
@@ -200,4 +211,21 @@ func RuntimeProtocolFamily(runtimeType string) (string, bool) {
 		return desc.ProtocolFamily, true
 	}
 	return runtimeType, IsSupportedType(runtimeType)
+}
+
+// ompBackend exposes the tested autonomous OMP execution path without
+// inheriting Pi's optional native-history or interactive-control interfaces.
+// OMP must prove those contracts independently before this wrapper grows them.
+type ompBackend struct {
+	delegate *piBackend
+}
+
+func (b *ompBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := validateInteractionOptions(opts); err != nil {
+		return nil, err
+	}
+	if isChatInteraction(opts) {
+		return nil, fmt.Errorf("omp interactive chat is unsupported")
+	}
+	return b.delegate.Execute(ctx, prompt, opts)
 }

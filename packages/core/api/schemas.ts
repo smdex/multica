@@ -13,13 +13,21 @@ import type {
   BillingTopupsPage,
   BillingTransactionsPage,
   CancelTaskResponse,
+  ChatControlResult,
+  ChatControls,
   ChatMessage,
+  ChatInteraction,
+  ChatInteractionsResponse,
   ChatDraftRestoresResponse,
   ChatPendingTask,
   ChatSession,
+  NativeSessionImportResult,
+  NativeSessionListResult,
   PrioritizeQueuedChatTaskResponse,
   SendChatMessageResponse,
   StartMikaOnboardingResponse,
+  WorkflowCapabilities,
+  WorkflowRequest,
   Comment,
   CreateBillingCheckoutSessionResponse,
   CreateBillingPortalSessionResponse,
@@ -829,6 +837,24 @@ const ChatQuickActionSchema = z.object({
   primary: z.boolean().optional(),
 }).loose();
 
+// Imported timeline rows have the same settled shape as task-message rows.
+// Keep this declaration local because ChatMessageSchema intentionally appears
+// before the task API schemas below; an imported event can never make a row
+// look live, so unknown types degrade to ordinary text rather than controls.
+const ImportedTimelineEventSchema = z.object({
+  task_id: z.string().default(""),
+  issue_id: z.string().default(""),
+  chat_session_id: z.string().optional(),
+  seq: z.number().default(0),
+  type: z.enum(["text", "thinking", "tool_use", "tool_result", "error"]).catch("text"),
+  tool: z.string().optional(),
+  content: z.string().optional(),
+  input: z.record(z.string(), z.unknown()).optional(),
+  output: z.string().optional(),
+  output_truncated: z.boolean().optional().catch(undefined),
+  created_at: z.string().optional(),
+}).loose();
+
 export const ChatMessageSchema = z.object({
   id: z.string(),
   chat_session_id: z.string(),
@@ -846,6 +872,7 @@ export const ChatMessageSchema = z.object({
   // Optional additive data degrades independently: a malformed suggestion
   // must not hide the assistant reply that contains it.
   quick_actions: z.array(ChatQuickActionSchema).catch([]).optional().default([]),
+  imported_events: z.array(ImportedTimelineEventSchema).optional().catch(undefined),
 }).loose();
 
 export const ChatMessageListSchema = z.array(ChatMessageSchema).default([]);
@@ -2032,6 +2059,11 @@ const ChatChannelSourceSchema = z.object({
   route_revision: z.number().default(0),
 }).loose();
 
+const ChatNativeOriginSchema = z.object({
+  provider: z.string().default(""),
+  imported_at: z.string().default(""),
+}).loose();
+
 export const ChatSessionSchema: z.ZodType<ChatSession> = z.object({
   id: z.string(),
   workspace_id: z.string().default(""),
@@ -2046,6 +2078,8 @@ export const ChatSessionSchema: z.ZodType<ChatSession> = z.object({
   pinned: z.boolean().optional(),
   channel_source: ChatChannelSourceSchema.optional().catch(undefined),
   is_current_channel_route: z.boolean().optional().catch(undefined),
+  interaction_mode: z.enum(["chat", "autonomous"]).optional().catch(undefined),
+  native_origin: ChatNativeOriginSchema.optional().catch(undefined),
   created_at: z.string().default(""),
   updated_at: z.string().default(""),
 }).loose();
@@ -2066,6 +2100,205 @@ export const ChatSessionListSchema = z
   .transform((sessions) => sessions.filter((session) => session.id !== ""))
   .default([]);
 export const EMPTY_CHAT_SESSION_LIST: ChatSession[] = [];
+
+// Paseo-like workflow responses are intentionally conservative. A malformed
+// capability must never turn on an action, and unknown operation/interaction
+// states stay visible only as unavailable status rather than a success path.
+export const WorkflowCapabilitiesSchema: z.ZodType<WorkflowCapabilities> = z.object({
+  runtime_id: z.string().default(""),
+  provider: z.string().default(""),
+  online: z.boolean().default(false),
+  native_sessions: z.object({
+    list: z.boolean().default(false),
+    import: z.boolean().default(false),
+  }).default({ list: false, import: false }),
+  controls: z.object({
+    steer: z.boolean().default(false),
+    approvals: z.boolean().default(false),
+    questions: z.boolean().default(false),
+  }).default({ steer: false, approvals: false, questions: false }),
+  reason: z.string().nullable().default(null),
+}).loose();
+
+export const EMPTY_WORKFLOW_CAPABILITIES: WorkflowCapabilities = {
+  runtime_id: "",
+  provider: "",
+  online: false,
+  native_sessions: { list: false, import: false },
+  controls: { steer: false, approvals: false, questions: false },
+  reason: null,
+};
+
+const NativeSessionSummarySchema = z.object({
+  // These are the complete, browser-safe public row shape. None may default:
+  // a partial item would otherwise fabricate a selectable source reference.
+  session_ref: z.string(),
+  revision: z.string(),
+  provider: z.string(),
+  title: z.string(),
+  cwd: z.string(),
+  preview: z.string(),
+  updated_at: z.string(),
+  model: z.string().nullable(),
+  imported_chat_session_id: z.string().nullable(),
+}).loose();
+
+const NativeSessionListResultSchema: z.ZodType<NativeSessionListResult> = z.object({
+  sessions: z.array(NativeSessionSummarySchema),
+  next_cursor: z.string().nullable(),
+  truncated: z.boolean(),
+}).loose();
+
+const NativeSessionImportResultSchema: z.ZodType<NativeSessionImportResult> = z.object({
+  chat_session_id: z.string(),
+  already_imported: z.boolean(),
+  warnings: z.array(z.string()),
+}).loose();
+
+const ChatControlResultSchema: z.ZodType<ChatControlResult> = z.object({
+  delivery: z.enum(["accepted", "rejected", "unknown"]),
+  message_id: z.string().nullable(),
+}).loose();
+
+const WorkflowRequestBaseSchema = z.object({
+  id: z.string().default(""),
+  runtime_id: z.string().default(""),
+  provider: z.string().default(""),
+  kind: z.preprocess(
+    (value) => ["native_session_list", "native_session_import", "steer", "interaction_response"].includes(String(value))
+      ? value
+      : "unknown",
+    z.enum(["native_session_list", "native_session_import", "steer", "interaction_response", "unknown"]),
+  ),
+  status: z.enum(["pending", "running", "completed", "failed", "unknown"]).catch("unknown"),
+  result: z.unknown().nullable().default(null),
+  error: z.object({
+    code: z.string().default(""),
+    message: z.string().default(""),
+  }).loose().nullable().default(null),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+/**
+ * Workflow result payloads are selected by their request kind. A generic
+ * union would let the defaultable list shape accept an import or delivery
+ * result first, losing the fields the caller needs to act safely.
+ */
+export const WorkflowRequestSchema: z.ZodType<WorkflowRequest> = WorkflowRequestBaseSchema
+  .transform((request, ctx) => {
+    if (request.result === null || request.kind === "unknown") {
+      return { ...request, result: null };
+    }
+
+    let parsed;
+    switch (request.kind) {
+      case "native_session_list":
+        parsed = NativeSessionListResultSchema.safeParse(request.result);
+        break;
+      case "native_session_import":
+        parsed = NativeSessionImportResultSchema.safeParse(request.result);
+        break;
+      default:
+        parsed = ChatControlResultSchema.safeParse(request.result);
+    }
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid result for workflow request kind ${request.kind}`,
+      });
+      return z.NEVER;
+    }
+    return { ...request, result: parsed.data };
+  });
+
+export const EMPTY_WORKFLOW_REQUEST: WorkflowRequest = {
+  id: "",
+  runtime_id: "",
+  provider: "",
+  kind: "unknown",
+  status: "unknown",
+  result: null,
+  error: null,
+  created_at: "",
+  updated_at: "",
+};
+
+export const ChatControlsSchema: z.ZodType<ChatControls> = z.object({
+  chat_session_id: z.string().default(""),
+  runtime_id: z.string().default(""),
+  task_id: z.string().nullable().default(null),
+  run_id: z.string().nullable().default(null),
+  turn_id: z.string().nullable().default(null),
+  active: z.boolean().default(false),
+  can_steer: z.boolean().default(false),
+  can_approve: z.boolean().default(false),
+  can_answer: z.boolean().default(false),
+  interaction_mode: z.preprocess(
+    (value) => value === "chat" || value === "autonomous" ? value : "unknown",
+    z.enum(["chat", "autonomous", "unknown"]),
+  ),
+  reason: z.string().nullable().default(null),
+}).loose();
+
+export const EMPTY_CHAT_CONTROLS: ChatControls = {
+  chat_session_id: "",
+  runtime_id: "",
+  task_id: null,
+  run_id: null,
+  turn_id: null,
+  active: false,
+  can_steer: false,
+  can_approve: false,
+  can_answer: false,
+  interaction_mode: "unknown",
+  reason: null,
+};
+
+const ChatInteractionOptionSchema = z.object({
+  id: z.string().default(""),
+  label: z.string().default(""),
+  description: z.string().default(""),
+}).loose();
+
+const ChatInteractionQuestionSchema = z.object({
+  id: z.string().default(""),
+  prompt: z.string().default(""),
+  options: z.array(ChatInteractionOptionSchema).default([]),
+  multiple: z.boolean().default(false),
+  allow_text: z.boolean().default(false),
+  // Secret prompts have no supported nonpersistent response path. Retaining
+  // this bit lets views fail closed rather than quietly displaying an input.
+  secret: z.boolean().default(true),
+}).loose();
+
+const ChatInteractionSchema: z.ZodType<ChatInteraction> = z.object({
+  id: z.string().default(""),
+  chat_session_id: z.string().default(""),
+  task_id: z.string().default(""),
+  run_id: z.string().default(""),
+  turn_id: z.string().default(""),
+  kind: z.preprocess(
+    (value) => value === "approval" || value === "question" ? value : "unknown",
+    z.enum(["approval", "question", "unknown"]),
+  ),
+  status: z.enum(["pending", "resolving", "resolved", "expired", "cancelled", "unknown"])
+    .catch("unknown"),
+  version: z.number().default(0),
+  title: z.string().default(""),
+  description: z.string().default(""),
+  tool: z.string().default(""),
+  input: z.record(z.string(), z.unknown()).default({}),
+  choices: z.array(ChatInteractionOptionSchema).default([]),
+  questions: z.array(ChatInteractionQuestionSchema).default([]),
+  expires_at: z.string().default(""),
+}).loose();
+
+export const ChatInteractionsResponseSchema: z.ZodType<ChatInteractionsResponse> = z.object({
+  items: z.array(ChatInteractionSchema).default([]),
+}).loose();
+
+export const EMPTY_CHAT_INTERACTIONS: ChatInteractionsResponse = { items: [] };
 
 // Deferred-cancellation draft restores
 // (`GET /api/chat/sessions/{id}/draft-restores`, #5219) feed the composer
@@ -3710,3 +3943,37 @@ export const RuntimeProfileSchema = z
     runtime_type: profile.runtime_type || profile.protocol_family,
   }));
 export const RuntimeProfileListSchema = z.array(RuntimeProfileSchema);
+
+// Work sources (see ../types/work-source). Schemas are lenient per repo
+// policy: unknown enum values (mode) and extra fields parse; identity fields
+// (source_handle, native_id) must be present strings so a malformed response
+// fails visibly rather than faking a usable source.
+export const WorkSourceSchema = z.object({
+  id: z.string().min(1),
+  workspace_id: z.string().min(1),
+  project_id: z.string().min(1).nullish().transform((v) => v ?? undefined),
+  runtime_id: z.string().min(1),
+  daemon_id: z.string().nullish().catch("").transform((v) => v ?? ""),
+  name: z.string().nullish().catch("").transform((v) => v ?? ""),
+  mode: z.string().nullish().catch("observe").transform((v) => v || "observe"),
+  enabled: z.boolean().nullish().catch(false).transform((v) => v ?? false),
+  source_handle: z.string().min(1),
+  config_revision: z.number().int().nonnegative().nullish().catch(0).transform((v) => v ?? 0),
+  last_health: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
+  last_error: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
+  created_by: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+export const WorkSourceListSchema = z.array(WorkSourceSchema);
+
+export const IssueWorkLinkSchema = z.object({
+  id: z.string().min(1),
+  workspace_id: z.string().min(1),
+  issue_id: z.string().min(1),
+  source_id: z.string().min(1),
+  native_id: z.string().min(1),
+  created_by: z.string().nullish().catch(undefined).transform((v) => v ?? undefined),
+  created_at: z.string(),
+}).loose();
+export const IssueWorkLinkListSchema = z.array(IssueWorkLinkSchema);

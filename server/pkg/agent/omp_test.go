@@ -12,13 +12,9 @@ import (
 	"time"
 )
 
-// TestOmpNewDispatchesToPiBackend asserts that ResolveBackend("omp") dispatches to the
-// pi backend via the descriptor registry — the core contract that omp is a
-// runtime identity on the pi protocol, not a separate protocol family.
-// IsSupportedType("omp") is false (it's not a protocol family), but New
-// resolves it through BuiltinRuntimes to the pi backend with the correct
-// executable and label overrides.
-func TestOmpNewDispatchesToPiBackend(t *testing.T) {
+// TestOmpNewBuildsExecutionOnlyWrapper asserts that OMP shares Pi's verified
+// autonomous event stream without inheriting Pi's optional capabilities.
+func TestOmpNewBuildsExecutionOnlyWrapper(t *testing.T) {
 	if IsSupportedType("omp") {
 		t.Errorf("omp must not be in SupportedTypes (it is a runtime identity, not a protocol family)")
 	}
@@ -26,15 +22,24 @@ func TestOmpNewDispatchesToPiBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New(omp) returned error: %v", err)
 	}
-	pb, ok := b.(*piBackend)
+	omp, ok := b.(*ompBackend)
 	if !ok {
-		t.Fatalf("New(omp) returned %T, want *piBackend", b)
+		t.Fatalf("New(omp) returned %T, want *ompBackend", b)
 	}
-	if pb.defaultExecutable != "omp" {
-		t.Errorf("defaultExecutable = %q, want %q", pb.defaultExecutable, "omp")
+	if omp.delegate.defaultExecutable != "omp" {
+		t.Errorf("defaultExecutable = %q, want %q", omp.delegate.defaultExecutable, "omp")
 	}
-	if pb.providerLabel != "omp" {
-		t.Errorf("providerLabel = %q, want %q", pb.providerLabel, "omp")
+	if omp.delegate.providerLabel != "omp" {
+		t.Errorf("providerLabel = %q, want %q", omp.delegate.providerLabel, "omp")
+	}
+	if _, ok := b.(InteractionCapabilityProvider); ok {
+		t.Fatal("OMP must not advertise unverified interactive capabilities")
+	}
+	if _, ok := b.(NativeSessionProvider); ok {
+		t.Fatal("OMP must not advertise unverified native history")
+	}
+	if _, ok := b.(NativeSessionImporter); ok {
+		t.Fatal("OMP must not advertise unverified native import")
 	}
 }
 
@@ -46,15 +51,27 @@ func TestNewRuntimeIsSeparateEntryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRuntime(omp): %v", err)
 	}
-	pb, ok := b.(*piBackend)
+	omp, ok := b.(*ompBackend)
 	if !ok {
-		t.Fatalf("NewRuntime(omp) returned %T, want *piBackend", b)
+		t.Fatalf("NewRuntime(omp) returned %T, want *ompBackend", b)
 	}
-	if pb.defaultExecutable != "omp" {
-		t.Errorf("defaultExecutable = %q, want %q", pb.defaultExecutable, "omp")
+	if omp.delegate.defaultExecutable != "omp" {
+		t.Errorf("defaultExecutable = %q, want %q", omp.delegate.defaultExecutable, "omp")
 	}
-	if pb.providerLabel != "omp" {
-		t.Errorf("providerLabel = %q, want %q", pb.providerLabel, "omp")
+	if omp.delegate.providerLabel != "omp" {
+		t.Errorf("providerLabel = %q, want %q", omp.delegate.providerLabel, "omp")
+	}
+}
+
+func TestOmpChatFailsBeforeProviderLaunch(t *testing.T) {
+	t.Parallel()
+
+	backend, err := ResolveBackend("omp", Config{ExecutablePath: "/does/not/need/to/exist", Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("ResolveBackend(omp): %v", err)
+	}
+	if _, err := backend.Execute(t.Context(), "chat", ExecOptions{InteractionMode: "chat"}); err == nil || !strings.Contains(err.Error(), "interactive chat is unsupported") {
+		t.Fatalf("chat Execute error = %v, want unsupported interaction error", err)
 	}
 }
 
@@ -368,22 +385,19 @@ func TestOmpAndPiCanCoexist(t *testing.T) {
 	if _, ok := piBe.(*piBackend); !ok {
 		t.Fatalf("pi backend is %T, want *piBackend", piBe)
 	}
-	if _, ok := ompBe.(*piBackend); !ok {
-		t.Fatalf("omp backend is %T, want *piBackend", ompBe)
-	}
 	pb := piBe.(*piBackend)
-	ob := ompBe.(*piBackend)
+	ob := requireOmpExecutionOnlyBackend(t, ompBe)
 	if pb.defaultExecutable != "" {
 		t.Errorf("pi defaultExecutable = %q, want empty", pb.defaultExecutable)
 	}
-	if ob.defaultExecutable != "omp" {
-		t.Errorf("omp defaultExecutable = %q, want %q", ob.defaultExecutable, "omp")
+	if ob.delegate.defaultExecutable != "omp" {
+		t.Errorf("omp defaultExecutable = %q, want %q", ob.delegate.defaultExecutable, "omp")
 	}
 	if pb.providerLabel != "" {
 		t.Errorf("pi providerLabel = %q, want empty", pb.providerLabel)
 	}
-	if ob.providerLabel != "omp" {
-		t.Errorf("omp providerLabel = %q, want %q", ob.providerLabel, "omp")
+	if ob.delegate.providerLabel != "omp" {
+		t.Errorf("omp providerLabel = %q, want %q", ob.delegate.providerLabel, "omp")
 	}
 }
 
@@ -478,20 +492,39 @@ func TestOmpAndPiRegisterSideBySide(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New(%q): %v", tc.id, err)
 			}
-			pb, ok := b.(*piBackend)
-			if !ok {
-				t.Fatalf("New(%q) = %T, want *piBackend", tc.id, b)
+			if tc.id == "pi" {
+				if _, ok := b.(*piBackend); !ok {
+					t.Fatalf("New(%q) = %T, want *piBackend", tc.id, b)
+				}
+				return
 			}
-			if tc.id == "omp" {
-				if pb.defaultExecutable != "omp" {
-					t.Errorf("defaultExecutable = %q, want %q", pb.defaultExecutable, "omp")
-				}
-				if pb.providerLabel != "omp" {
-					t.Errorf("providerLabel = %q, want %q", pb.providerLabel, "omp")
-				}
+			omp := requireOmpExecutionOnlyBackend(t, b)
+			if omp.delegate.defaultExecutable != "omp" {
+				t.Errorf("defaultExecutable = %q, want %q", omp.delegate.defaultExecutable, "omp")
+			}
+			if omp.delegate.providerLabel != "omp" {
+				t.Errorf("providerLabel = %q, want %q", omp.delegate.providerLabel, "omp")
 			}
 		})
 	}
+}
+
+func requireOmpExecutionOnlyBackend(t *testing.T, backend Backend) *ompBackend {
+	t.Helper()
+	omp, ok := backend.(*ompBackend)
+	if !ok {
+		t.Fatalf("OMP backend is %T, want *ompBackend", backend)
+	}
+	if _, ok := backend.(InteractionCapabilityProvider); ok {
+		t.Fatal("OMP must not advertise Pi interactive capabilities")
+	}
+	if _, ok := backend.(NativeSessionProvider); ok {
+		t.Fatal("OMP must not advertise Pi native history")
+	}
+	if _, ok := backend.(NativeSessionImporter); ok {
+		t.Fatal("OMP must not advertise Pi native import")
+	}
+	return omp
 }
 
 // levelValues flattens a ModelThinking's advertised levels for comparison.

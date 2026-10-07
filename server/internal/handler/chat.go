@@ -27,14 +27,56 @@ import (
 // meaningful summary, short enough to keep the dropdown row scannable.
 const chatSessionTitleMaxLen = 200
 
+func boolCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
+}
+
+// validateChatInteractionMode keeps existing clients autonomous by default,
+// while only admitting an interactive mode on a currently capable runtime.
+func (h *Handler) validateChatInteractionMode(w http.ResponseWriter, r *http.Request, agent db.Agent, requested *string) (string, bool) {
+	if requested == nil {
+		return "autonomous", true
+	}
+	mode := strings.TrimSpace(*requested)
+	if mode != "chat" && mode != "autonomous" {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "interaction_mode must be chat or autonomous")
+		return "", false
+	}
+	if mode != "chat" {
+		return mode, true
+	}
+	if !agent.RuntimeID.Valid {
+		writeErrorCode(w, http.StatusUnprocessableEntity, "unsupported", "chat interaction mode requires a runtime")
+		return "", false
+	}
+	runtime, err := h.Queries.GetAgentRuntime(r.Context(), agent.RuntimeID)
+	if err != nil || runtime.Status != "online" {
+		writeErrorCode(w, http.StatusServiceUnavailable, "runtime_offline", "chat interaction mode requires an online runtime")
+		return "", false
+	}
+	capabilities := workflowRuntimeCapabilities(runtime)
+	if !capabilities.Controls.Steer && !capabilities.Controls.Approvals && !capabilities.Controls.Questions {
+		writeErrorCode(w, http.StatusUnprocessableEntity, "unsupported", "chat interaction mode is unsupported by this runtime")
+		return "", false
+	}
+	return mode, true
+}
+
 // ---------------------------------------------------------------------------
 // Chat Sessions
 // ---------------------------------------------------------------------------
 
 type CreateChatSessionRequest struct {
-	AgentID   string  `json:"agent_id"`
-	Title     string  `json:"title"`
-	ProjectID *string `json:"project_id"`
+	AgentID         string  `json:"agent_id"`
+	Title           string  `json:"title"`
+	ProjectID       *string `json:"project_id"`
+	InteractionMode *string `json:"interaction_mode"`
 }
 
 func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +122,10 @@ func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if agent.ArchivedAt.Valid {
 		writeError(w, http.StatusBadRequest, "agent is archived")
+		return
+	}
+	interactionMode, ok := h.validateChatInteractionMode(w, r, agent, req.InteractionMode)
+	if !ok {
 		return
 	}
 	// Invocation gate: starting a chat produces agent runs, so it uses the
@@ -143,6 +189,13 @@ func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to mark chat session explicit")
 		return
 	}
+	if interactionMode == "chat" {
+		session, err = qtx.UpdateChatSessionInteractionMode(r.Context(), db.UpdateChatSessionInteractionModeParams{ID: session.ID, WorkspaceID: workspaceUUID, InteractionMode: interactionMode})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to set chat interaction mode")
+			return
+		}
+	}
 
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit chat session create")
@@ -196,19 +249,21 @@ func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			resp = append(resp, ChatSessionResponse{
-				ID:          uuidToString(s.ID),
-				WorkspaceID: uuidToString(s.WorkspaceID),
-				AgentID:     uuidToString(s.AgentID),
-				CreatorID:   uuidToString(s.CreatorID),
-				ProjectID:   uuidToPtr(s.ProjectID),
-				Title:       s.Title,
-				Status:      s.Status,
-				HasUnread:   s.UnreadCount > 0,
-				UnreadCount: int(s.UnreadCount),
-				LastMessage: buildChatLastMessage(s.LastMessageAt, s.LastMessageContent, s.LastMessageRole, s.LastMessageFailureReason, s.LastMessageKind),
-				Pinned:      s.PinnedAt.Valid,
-				CreatedAt:   timestampToString(s.CreatedAt),
-				UpdatedAt:   timestampToString(s.UpdatedAt),
+				ID:              uuidToString(s.ID),
+				WorkspaceID:     uuidToString(s.WorkspaceID),
+				AgentID:         uuidToString(s.AgentID),
+				CreatorID:       uuidToString(s.CreatorID),
+				ProjectID:       uuidToPtr(s.ProjectID),
+				Title:           s.Title,
+				Status:          s.Status,
+				HasUnread:       s.UnreadCount > 0,
+				UnreadCount:     int(s.UnreadCount),
+				LastMessage:     buildChatLastMessage(s.LastMessageAt, s.LastMessageContent, s.LastMessageRole, s.LastMessageFailureReason, s.LastMessageKind),
+				Pinned:          s.PinnedAt.Valid,
+				InteractionMode: s.InteractionMode,
+				NativeOrigin:    chatNativeOrigin(s.NativeImportProvider, s.NativeImportedAt),
+				CreatedAt:       timestampToString(s.CreatedAt),
+				UpdatedAt:       timestampToString(s.UpdatedAt),
 			})
 		}
 	} else {
@@ -226,19 +281,21 @@ func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			resp = append(resp, ChatSessionResponse{
-				ID:          uuidToString(s.ID),
-				WorkspaceID: uuidToString(s.WorkspaceID),
-				AgentID:     uuidToString(s.AgentID),
-				CreatorID:   uuidToString(s.CreatorID),
-				ProjectID:   uuidToPtr(s.ProjectID),
-				Title:       s.Title,
-				Status:      s.Status,
-				HasUnread:   s.UnreadCount > 0,
-				UnreadCount: int(s.UnreadCount),
-				LastMessage: buildChatLastMessage(s.LastMessageAt, s.LastMessageContent, s.LastMessageRole, s.LastMessageFailureReason, s.LastMessageKind),
-				Pinned:      s.PinnedAt.Valid,
-				CreatedAt:   timestampToString(s.CreatedAt),
-				UpdatedAt:   timestampToString(s.UpdatedAt),
+				ID:              uuidToString(s.ID),
+				WorkspaceID:     uuidToString(s.WorkspaceID),
+				AgentID:         uuidToString(s.AgentID),
+				CreatorID:       uuidToString(s.CreatorID),
+				ProjectID:       uuidToPtr(s.ProjectID),
+				Title:           s.Title,
+				Status:          s.Status,
+				HasUnread:       s.UnreadCount > 0,
+				UnreadCount:     int(s.UnreadCount),
+				LastMessage:     buildChatLastMessage(s.LastMessageAt, s.LastMessageContent, s.LastMessageRole, s.LastMessageFailureReason, s.LastMessageKind),
+				Pinned:          s.PinnedAt.Valid,
+				InteractionMode: s.InteractionMode,
+				NativeOrigin:    chatNativeOrigin(s.NativeImportProvider, s.NativeImportedAt),
+				CreatedAt:       timestampToString(s.CreatedAt),
+				UpdatedAt:       timestampToString(s.UpdatedAt),
 			})
 		}
 	}
@@ -343,8 +400,9 @@ func (h *Handler) GetChatSession(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateChatSessionRequest struct {
-	Title     *string         `json:"title"`
-	ProjectID json.RawMessage `json:"project_id"`
+	Title           *string         `json:"title"`
+	ProjectID       json.RawMessage `json:"project_id"`
+	InteractionMode *string         `json:"interaction_mode"`
 }
 
 // UpdateChatSession updates one user-editable field on a chat session. Title
@@ -367,8 +425,9 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 	}
 	hasTitle := req.Title != nil
 	hasProjectID := req.ProjectID != nil
-	if hasTitle == hasProjectID {
-		writeError(w, http.StatusBadRequest, "exactly one of title or project_id is required")
+	hasInteractionMode := req.InteractionMode != nil
+	if boolCount(hasTitle, hasProjectID, hasInteractionMode) != 1 {
+		writeError(w, http.StatusBadRequest, "exactly one of title, project_id, or interaction_mode is required")
 		return
 	}
 
@@ -396,7 +455,7 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 			ID:    session.ID,
 			Title: title,
 		})
-	} else {
+	} else if hasProjectID {
 		projectID := pgtype.UUID{Valid: false}
 		if string(req.ProjectID) != "null" {
 			var rawProjectID string
@@ -446,6 +505,21 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 			err = tx.Commit(r.Context())
 		}
 		projectIDChanged = true
+	} else {
+		agent, lookupErr := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{ID: session.AgentID, WorkspaceID: session.WorkspaceID})
+		if lookupErr != nil {
+			writeErrorCode(w, http.StatusNotFound, "not_found", "agent not found")
+			return
+		}
+		interactionMode, valid := h.validateChatInteractionMode(w, r, agent, req.InteractionMode)
+		if !valid {
+			return
+		}
+		updated, err = h.Queries.UpdateChatSessionInteractionMode(r.Context(), db.UpdateChatSessionInteractionModeParams{ID: session.ID, WorkspaceID: session.WorkspaceID, InteractionMode: interactionMode})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErrorCode(w, http.StatusConflict, "session_busy", "chat interaction mode cannot change while a task is active")
+			return
+		}
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update chat session")
@@ -759,6 +833,15 @@ func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := qtx.DeleteTaskInteractionsByChatSession(r.Context(), session.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete chat interactions")
+		return
+	}
+	if err := qtx.DeleteAgentWorkflowRequestsByChatSession(r.Context(), session.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete chat workflow requests")
+		return
+	}
+
 	if err := qtx.DeleteChatSession(r.Context(), db.DeleteChatSessionParams{
 		ID:          session.ID,
 		WorkspaceID: session.WorkspaceID,
@@ -768,6 +851,10 @@ func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := qtx.DeleteAgentLabelAssignmentsByAgent(r.Context(), session.AgentID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove chat session agent label assignments")
+		return
+	}
+	if err := qtx.DeleteWorkflowRequestsBySystemAgent(r.Context(), uuidToString(session.AgentID)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to clean up system agent workflow requests")
 		return
 	}
 	if err := qtx.DeleteSystemAgentByID(r.Context(), session.AgentID); err != nil {
@@ -1908,13 +1995,15 @@ func (h *Handler) CancelTaskByUser(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 type ChatSessionResponse struct {
-	ID          string  `json:"id"`
-	WorkspaceID string  `json:"workspace_id"`
-	AgentID     string  `json:"agent_id"`
-	CreatorID   string  `json:"creator_id"`
-	ProjectID   *string `json:"project_id"`
-	Title       string  `json:"title"`
-	Status      string  `json:"status"`
+	ID              string                           `json:"id"`
+	WorkspaceID     string                           `json:"workspace_id"`
+	AgentID         string                           `json:"agent_id"`
+	CreatorID       string                           `json:"creator_id"`
+	ProjectID       *string                          `json:"project_id"`
+	Title           string                           `json:"title"`
+	Status          string                           `json:"status"`
+	InteractionMode string                           `json:"interaction_mode"`
+	NativeOrigin    *ChatSessionNativeOriginResponse `json:"native_origin,omitempty"`
 	// Only populated by list endpoints — single-session fetches return 0/false/nil.
 	// HasUnread is kept as a convenience (== UnreadCount > 0) for existing consumers.
 	HasUnread   bool             `json:"has_unread"`
@@ -1930,6 +2019,11 @@ type ChatSessionResponse struct {
 	IsCurrentChannelRoute *bool                             `json:"is_current_channel_route,omitempty"`
 	CreatedAt             string                            `json:"created_at"`
 	UpdatedAt             string                            `json:"updated_at"`
+}
+
+type ChatSessionNativeOriginResponse struct {
+	Provider   string `json:"provider"`
+	ImportedAt string `json:"imported_at"`
 }
 
 type ChatSessionChannelSourceResponse struct {
@@ -2021,36 +2115,49 @@ type ChatMessageResponse struct {
 	// agent can `multica attachment download <id>` rather than guessing
 	// from a markdown URL that may expire.
 	Attachments []AttachmentResponse `json:"attachments,omitempty"`
+	// ImportedEvents is present only on imported assistant history. It uses the
+	// existing settled timeline event shape and never manufactures a task id.
+	ImportedEvents json.RawMessage `json:"imported_events,omitempty"`
+}
+
+func chatNativeOrigin(provider pgtype.Text, importedAt pgtype.Timestamptz) *ChatSessionNativeOriginResponse {
+	if !provider.Valid || !importedAt.Valid {
+		return nil
+	}
+	return &ChatSessionNativeOriginResponse{Provider: provider.String, ImportedAt: timestampToString(importedAt)}
 }
 
 func chatSessionToResponse(s db.ChatSession) ChatSessionResponse {
 	return ChatSessionResponse{
-		ID:          uuidToString(s.ID),
-		WorkspaceID: uuidToString(s.WorkspaceID),
-		AgentID:     uuidToString(s.AgentID),
-		CreatorID:   uuidToString(s.CreatorID),
-		ProjectID:   uuidToPtr(s.ProjectID),
-		Title:       s.Title,
-		Status:      s.Status,
-		Pinned:      s.PinnedAt.Valid,
-		CreatedAt:   timestampToString(s.CreatedAt),
-		UpdatedAt:   timestampToString(s.UpdatedAt),
+		ID:              uuidToString(s.ID),
+		WorkspaceID:     uuidToString(s.WorkspaceID),
+		AgentID:         uuidToString(s.AgentID),
+		CreatorID:       uuidToString(s.CreatorID),
+		ProjectID:       uuidToPtr(s.ProjectID),
+		Title:           s.Title,
+		Status:          s.Status,
+		InteractionMode: s.InteractionMode,
+		NativeOrigin:    chatNativeOrigin(s.NativeImportProvider, s.NativeImportedAt),
+		Pinned:          s.PinnedAt.Valid,
+		CreatedAt:       timestampToString(s.CreatedAt),
+		UpdatedAt:       timestampToString(s.UpdatedAt),
 	}
 }
 
 func chatMessageToResponse(m db.ChatMessage, attachments []AttachmentResponse) ChatMessageResponse {
 	return ChatMessageResponse{
-		ID:            uuidToString(m.ID),
-		ChatSessionID: uuidToString(m.ChatSessionID),
-		Role:          m.Role,
-		Content:       m.Content,
-		TaskID:        uuidToPtr(m.TaskID),
-		CreatedAt:     timestampToString(m.CreatedAt),
-		FailureReason: textToPtr(m.FailureReason),
-		ElapsedMs:     int8ToPtr(m.ElapsedMs),
-		MessageKind:   normalizeMessageKind(m.MessageKind),
-		QuickActions:  decodeChatQuickActions(m.QuickActions),
-		Attachments:   attachments,
+		ID:             uuidToString(m.ID),
+		ChatSessionID:  uuidToString(m.ChatSessionID),
+		Role:           m.Role,
+		Content:        m.Content,
+		TaskID:         uuidToPtr(m.TaskID),
+		CreatedAt:      timestampToString(m.CreatedAt),
+		FailureReason:  textToPtr(m.FailureReason),
+		ElapsedMs:      int8ToPtr(m.ElapsedMs),
+		MessageKind:    normalizeMessageKind(m.MessageKind),
+		QuickActions:   decodeChatQuickActions(m.QuickActions),
+		Attachments:    attachments,
+		ImportedEvents: append(json.RawMessage(nil), m.ImportedEvents...),
 	}
 }
 

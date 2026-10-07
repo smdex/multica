@@ -66,6 +66,13 @@ import {
   PluginPreviewSchema,
   EMPTY_PLUGIN_INSTALLATION_LIST,
   EMPTY_PLUGIN_PREVIEW,
+  ChatControlsSchema,
+  ChatInteractionsResponseSchema,
+  EMPTY_CHAT_CONTROLS,
+  EMPTY_CHAT_INTERACTIONS,
+  EMPTY_WORKFLOW_CAPABILITIES,
+  WorkflowCapabilitiesSchema,
+  WorkflowRequestSchema,
 } from "./schemas";
 import { IssueViewSchema, IssueViewListSchema } from "./schemas";
 import {
@@ -2353,5 +2360,105 @@ describe("AgentActivityBucketListSchema duration", () => {
     expect(parsed[0]?.task_count).toBe(201);
     expect(parsed[0]?.duration_ms).toBeUndefined();
     expect(parsed[0]?.duration_count).toBeUndefined();
+  });
+});
+
+describe("agent workflow schemas", () => {
+  it("fails closed when a capability response is malformed", () => {
+    const parsed = parseWithFallback(
+      { runtime_id: 7, native_sessions: { list: true, import: true } },
+      WorkflowCapabilitiesSchema,
+      EMPTY_WORKFLOW_CAPABILITIES,
+      { endpoint: "GET /api/runtimes/:id/agent-workflow-capabilities" },
+    );
+
+    expect(parsed).toEqual(EMPTY_WORKFLOW_CAPABILITIES);
+  });
+
+  it("keeps unknown workflow states unavailable", () => {
+    const parsed = WorkflowRequestSchema.parse({
+      id: "request-1",
+      runtime_id: "runtime-1",
+      provider: "future-provider",
+      kind: "fork_everything",
+      status: "delivered",
+      result: { delivery: "accepted", message_id: "message-1" },
+    });
+
+    expect(parsed.kind).toBe("unknown");
+    expect(parsed.status).toBe("unknown");
+    expect(parsed.result).toBeNull();
+  });
+
+  it("keeps an import result instead of parsing it as an empty list", () => {
+    const parsed = WorkflowRequestSchema.parse({
+      id: "request-import",
+      runtime_id: "runtime-1",
+      provider: "codex",
+      kind: "native_session_import",
+      status: "completed",
+      result: {
+        chat_session_id: "chat-imported",
+        already_imported: false,
+        warnings: ["Native copy was compacted."],
+      },
+    });
+
+    expect(parsed.result).toEqual({
+      chat_session_id: "chat-imported",
+      already_imported: false,
+      warnings: ["Native copy was compacted."],
+    });
+  });
+
+  it("rejects an incomplete native-list result instead of inventing pagination defaults", () => {
+    const parsed = WorkflowRequestSchema.safeParse({
+      id: "request-list",
+      runtime_id: "runtime-1",
+      provider: "codex",
+      kind: "native_session_list",
+      status: "completed",
+      result: {
+        sessions: [],
+        // Both values are part of the public list-result discriminator. A
+        // server must send null/false rather than relying on client defaults.
+        next_cursor: null,
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it("keeps a steering delivery result instead of parsing it as an empty list", () => {
+    const parsed = WorkflowRequestSchema.parse({
+      id: "request-steer",
+      runtime_id: "runtime-1",
+      provider: "codex",
+      kind: "steer",
+      status: "completed",
+      result: { delivery: "accepted", message_id: "message-1" },
+    });
+
+    expect(parsed.result).toEqual({ delivery: "accepted", message_id: "message-1" });
+  });
+
+  it("defaults missing control admission to false and secret questions remain marked secret", () => {
+    expect(ChatControlsSchema.parse({ chat_session_id: "chat-1" }))
+      .toEqual({ ...EMPTY_CHAT_CONTROLS, chat_session_id: "chat-1" });
+
+    const interactions = ChatInteractionsResponseSchema.parse({
+      items: [{
+        id: "interaction-1",
+        kind: "question",
+        questions: [{ id: "secret", prompt: "Enter token" }],
+      }],
+    });
+    expect(interactions.items[0]?.questions[0]?.secret).toBe(true);
+    expect(parseWithFallback(
+      { items: "not an array" },
+      ChatInteractionsResponseSchema,
+      EMPTY_CHAT_INTERACTIONS,
+      { endpoint: "GET /api/chat-sessions/:id/interactions" },
+    )).toEqual(EMPTY_CHAT_INTERACTIONS);
   });
 });

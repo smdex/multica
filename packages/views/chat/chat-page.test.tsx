@@ -50,6 +50,12 @@ vi.mock("./components/chat-empty-state", () => ({
 vi.mock("./components/new-chat-button", () => ({
   NewChatButton: () => <div>new-chat-button</div>,
 }));
+// This suite owns URL/session-layout behavior. Native history has dedicated
+// dialog tests and requires the workspace mutation provider the page fake
+// intentionally does not mount.
+vi.mock("./components/native-history-import-dialog", () => ({
+  NativeHistoryImportDialog: () => null,
+}));
 vi.mock("./components/offline-banner", () => ({
   OfflineBanner: () => null,
 }));
@@ -173,6 +179,21 @@ vi.mock("./components/use-chat-controller", async () => {
       archiveSession: vi.fn(),
       setActiveSession: mockSetActiveSession,
       setSelectedAgentId: vi.fn(),
+      workflow: {
+        capabilities: undefined,
+        controls: undefined,
+        interactions: [],
+        interactionMode: "autonomous",
+        canUseChatMode: false,
+        canSendNow: false,
+        sendNowUnavailable: true,
+        handleSendNow: vi.fn(),
+        steerOperation: undefined,
+        steerError: null,
+        modeError: false,
+        setInteractionMode: vi.fn(),
+        isModeUpdating: false,
+      },
     }),
   };
 });

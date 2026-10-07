@@ -10,6 +10,13 @@ export type {
   UpdateIssueStatusRequest,
 } from "./issue-status";
 export type {
+  WorkSource,
+  IssueWorkLink,
+  CreateWorkSourceParams,
+  UpdateWorkSourceParams,
+  CreateIssueWorkLinkParams,
+} from "./work-source";
+export type {
   Agent,
   AgentConversationStarter,
   AgentStatus,
@@ -152,6 +159,8 @@ export {
 } from "./attachment-url";
 export type {
   ChatSession,
+  ChatInteractionMode,
+  ChatNativeOrigin,
   ChatLastMessage,
   ChatPinnedAgent,
   ChatMessage,
@@ -171,6 +180,24 @@ export type {
   CancelTaskResponse,
   ChatDraftRestore,
   ChatDraftRestoresResponse,
+  WorkflowCapabilities,
+  WorkflowRequestKind,
+  WorkflowRequestStatus,
+  WorkflowRequestError,
+  WorkflowRequest,
+  NativeSessionSummary,
+  NativeSessionListResult,
+  NativeSessionImportResult,
+  ChatControls,
+  ChatControlResult,
+  ChatInteractionKind,
+  ChatInteractionStatus,
+  ChatInteractionOption,
+  ChatInteractionQuestion,
+  ChatInteraction,
+  ChatInteractionsResponse,
+  ChatInteractionAnswer,
+  ChatInteractionResponse,
 } from "./chat";
 export type { StorageAdapter } from "./storage";
 export type {

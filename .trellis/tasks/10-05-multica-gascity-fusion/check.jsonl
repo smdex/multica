@@ -1,0 +1,4 @@
+{"file":"AGENTS.md","reason":"Verify package, auth, API compatibility and migration/test contracts"}
+{"file":".trellis/tasks/10-05-multica-gascity-fusion/prd.md","reason":"Requirement-to-acceptance mapping, no false product completion"}
+{"file":".trellis/tasks/10-05-multica-gascity-fusion/implementation-context.md","reason":"Bounded safety contracts; read selected full design.md acceptance section during review"}
+{"file":".trellis/tasks/10-05-multica-gascity-fusion/implement.md","reason":"Regression, real integration and user-runnable E2E gates"}

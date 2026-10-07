@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 type startTaskTransport func(*http.Request) (*http.Response, error)
@@ -175,5 +178,103 @@ func TestStartTaskBudgetAndMissingClaim(t *testing.T) {
 	defer cancel()
 	if _, err := client.StartTask(ctx, startTestClaim()); err == nil || calls != 1 {
 		t.Fatalf("deadline: %v, calls=%d", err, calls)
+	}
+}
+
+func TestStartTaskWorkflowRunIdentity(t *testing.T) {
+	defer noSleepRetry(t)()
+	const runID = "00000000-0000-0000-0000-000000000102"
+	for _, tc := range []struct {
+		name         string
+		claimFenced  bool
+		runID        string
+		loseResponse bool
+		wantCalls    int
+		wantError    bool
+	}{
+		{name: "claim-fenced", claimFenced: true, runID: runID, wantCalls: 1},
+		{name: "claim-fenced response loss", claimFenced: true, runID: runID, loseResponse: true, wantCalls: 2},
+		{name: "legacy", runID: runID, wantCalls: 1},
+		{name: "legacy response loss", runID: runID, loseResponse: true, wantCalls: 1, wantError: true},
+		{name: "no run identity", claimFenced: true, wantCalls: 1},
+		{name: "blank run identity", claimFenced: true, runID: " \t", wantCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := startTestClaim()
+			claim.StartClaimSupported = tc.claimFenced
+			claim.WorkflowRunID = tc.runID
+			calls := 0
+			var firstBody []byte
+			client := NewClient("https://daemon.test")
+			client.client.Transport = startTaskTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("read start request: %v", err)
+				}
+				if calls == 1 {
+					firstBody = body
+				} else if !bytes.Equal(body, firstBody) {
+					t.Fatalf("replay changed start payload\nfirst: %s\nreplay: %s", firstBody, body)
+				}
+				var start struct {
+					RunID        string   `json:"run_id"`
+					RuntimeID    string   `json:"runtime_id"`
+					DispatchedAt string   `json:"dispatched_at"`
+					Capabilities []string `json:"capabilities"`
+				}
+				if err := json.Unmarshal(body, &start); err != nil {
+					t.Fatalf("decode start request: %v", err)
+				}
+				wantRunID := tc.runID
+				if strings.TrimSpace(wantRunID) == "" {
+					wantRunID = ""
+					if bytes.Contains(body, []byte(`"run_id"`)) {
+						t.Fatalf("empty run identity was sent: %s", body)
+					}
+				}
+				if start.RunID != wantRunID || len(start.Capabilities) != 1 || start.Capabilities[0] != protocol.DaemonCapabilityTaskSupplementV1 {
+					t.Fatalf("start payload lost run identity or supplement offer: %s", body)
+				}
+				if tc.claimFenced {
+					if start.RuntimeID != claim.RuntimeID || start.DispatchedAt != claim.DispatchedAt {
+						t.Fatalf("start payload lost claim identity: %s", body)
+					}
+				} else if start.RuntimeID != "" || start.DispatchedAt != "" {
+					t.Fatalf("legacy start included unsupported claim fields: %s", body)
+				}
+				if calls == 1 && tc.loseResponse {
+					return nil, io.ErrUnexpectedEOF
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"supplement_capability":"task-supplement-v1"}`)),
+					Header:     make(http.Header),
+				}, nil
+			})
+			negotiated, err := client.StartTask(context.Background(), claim, protocol.DaemonCapabilityTaskSupplementV1)
+			if (err != nil) != tc.wantError || calls != tc.wantCalls || negotiated != !tc.wantError {
+				t.Fatalf("negotiated=%t err=%v calls=%d, want negotiated=%t error=%t calls=%d", negotiated, err, calls, !tc.wantError, tc.wantError, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestTaskWorkflowRunIDIsLocal(t *testing.T) {
+	claim := startTestClaim()
+	claim.WorkflowRunID = "local-run"
+	body, err := json.Marshal(claim)
+	if err != nil {
+		t.Fatalf("marshal claim: %v", err)
+	}
+	if bytes.Contains(body, []byte("local-run")) {
+		t.Fatalf("local execution identity leaked into claim JSON: %s", body)
+	}
+	var decoded Task
+	if err := json.Unmarshal([]byte(`{"id":"task-1","run_id":"remote-run","workflow_run_id":"remote-run","WorkflowRunID":"remote-run"}`), &decoded); err != nil {
+		t.Fatalf("decode claim: %v", err)
+	}
+	if decoded.WorkflowRunID != "" {
+		t.Fatalf("server claim supplied local execution identity: %q", decoded.WorkflowRunID)
 	}
 }

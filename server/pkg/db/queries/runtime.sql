@@ -21,6 +21,12 @@ ORDER BY created_at ASC;
 SELECT * FROM agent_runtime
 WHERE id = $1;
 
+-- name: UpdateAgentRuntimeWorkflowCapabilities :exec
+UPDATE agent_runtime
+SET agent_workflow_capabilities = @capabilities::jsonb,
+    updated_at = now()
+WHERE id = $1;
+
 -- name: GetAgentRuntimes :many
 -- Batch variant of GetAgentRuntime (MUL-4257): loads every runtime in the
 -- input set in one round trip so the machine-level batch claim handler can

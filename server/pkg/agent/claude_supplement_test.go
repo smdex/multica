@@ -311,6 +311,15 @@ func runFakeClaudeSupplement() {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	if os.Getenv("CLAUDE_SUPPLEMENT_CHAT") == "1" {
+		fmt.Println(`{"type":"control_request","request_id":"chat-approval","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"pwd"}}}`)
+		frame := read()
+		response, _ := frame["response"].(map[string]any)
+		output, _ := response["response"].(map[string]any)
+		if frame["type"] != "control_response" || response["request_id"] != "chat-approval" || output["behavior"] != "allow" {
+			os.Exit(20)
+		}
+	}
 	if out := hook("Stop"); len(out) != 0 {
 		os.Exit(17)
 	}
@@ -321,14 +330,27 @@ func runFakeClaudeSupplement() {
 }
 
 func TestClaudeSupplementExecuteUsesSamePromptUnderBackpressure(t *testing.T) {
+	testClaudeSupplementExecute(t, "")
+}
+
+func TestClaudeChatSupplementKeepsNativePermissions(t *testing.T) {
+	testClaudeSupplementExecute(t, "chat")
+}
+
+func testClaudeSupplementExecute(t *testing.T, interactionMode string) {
+	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &claudeBackend{cfg: Config{ExecutablePath: self, Logger: slog.Default(), Env: map[string]string{"CLAUDE_FAKE_MODE": "supplement", "IS_SANDBOX": "1"}}}
+	env := map[string]string{"CLAUDE_FAKE_MODE": "supplement", "IS_SANDBOX": "1"}
+	if interactionMode == "chat" {
+		env["CLAUDE_SUPPLEMENT_CHAT"] = "1"
+	}
+	b := &claudeBackend{cfg: Config{ExecutablePath: self, Logger: slog.Default(), Env: env}}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	session, err := b.Execute(ctx, "original goal", ExecOptions{EnableTaskSupplement: true})
+	session, err := b.Execute(ctx, "original goal", ExecOptions{EnableTaskSupplement: true, InteractionMode: interactionMode})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,6 +368,27 @@ func TestClaudeSupplementExecuteUsesSamePromptUnderBackpressure(t *testing.T) {
 	}
 	if err := session.Supplement(ctx, strings.Repeat("context ", 8192)); err != nil {
 		t.Fatal(err)
+	}
+	if interactionMode == "chat" {
+		if session.ControlState == nil || session.RespondToInteraction == nil || session.CancelPendingInputs == nil {
+			t.Fatal("Claude chat controls missing alongside supplements")
+		}
+		var interaction *InteractionRequest
+		for message := range session.Messages {
+			if message.Interaction != nil {
+				interaction = message.Interaction
+				break
+			}
+		}
+		if interaction == nil || interaction.Kind != "approval" {
+			t.Fatalf("chat approval = %+v", interaction)
+		}
+		delivery, err := session.RespondToInteraction(ctx, InteractionResponse{
+			ID: "chat-approval-response", InteractionID: interaction.ID, ExpectedTurnID: interaction.TurnID, ChoiceID: "allow_once",
+		})
+		if err != nil || delivery.State != "unknown" {
+			t.Fatalf("chat approval delivery = %+v, %v", delivery, err)
+		}
 	}
 	select {
 	case result := <-session.Result:

@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { TriangleAlert } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
+import { Button } from "@multica/ui/components/ui/button";
 import {
   ContentEditor,
   type ContentEditorRef,
@@ -35,6 +36,13 @@ const EMPTY_UPLOADS: DraftUpload[] = [];
 /** Editor identity for the chat composer — see the editorKey note below. */
 const CHAT_COMPOSER_EDITOR_KEY = "chat-composer";
 
+type ChatInputSend = (
+  content: string,
+  attachmentIds: string[] | undefined,
+  commitInput: (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void,
+  draftAttachments: Attachment[],
+) => void | boolean | Promise<void | boolean>;
+
 function attachmentReferenceUrls(attachment: Attachment): string[] {
   const withUploadFields = attachment as Attachment & {
     markdownLink?: string;
@@ -55,12 +63,14 @@ function isAttachmentReferenced(content: string, attachment: Attachment): boolea
 }
 
 interface ChatInputProps {
-  onSend: (
-    content: string,
-    attachmentIds: string[] | undefined,
-    commitInput: (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void,
-    draftAttachments: Attachment[],
-  ) => void | boolean | Promise<void | boolean>;
+  onSend: ChatInputSend;
+  /** Exact-turn steering. Queue keeps its existing normal task behavior. */
+  onSendNow?: ChatInputSend;
+  /** Show Send now only when the server advertises a steering implementation. */
+  showSendNow?: boolean;
+  /** Missing identities, a waiting interaction, or a pending/unknown command disable it. */
+  sendNowEnabled?: boolean;
+  sendNowUnavailableLabel?: string;
   restoreDraftRequest?: {
     id: string;
     content: string;
@@ -148,6 +158,10 @@ interface ChatInputProps {
 
 export function ChatInput({
   onSend,
+  onSendNow,
+  showSendNow,
+  sendNowEnabled,
+  sendNowUnavailableLabel,
   restoreDraftRequest,
   conversationStarterRequest,
   onConversationStarterApplied,
@@ -177,6 +191,8 @@ export function ChatInput({
   const { t: tEditor } = useT("editor");
   const sendShortcut = useShortcut("send");
   const editorRef = useRef<ContentEditorRef>(null);
+  const dispatchRef = useRef<ChatInputSend>(onSend);
+  dispatchRef.current = onSend;
   const composerRef = useRef<HTMLDivElement>(null);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   // Two keys with deliberately different concerns:
@@ -539,7 +555,7 @@ export function ChatInput({
         if (lateMd != null) commitDraft(editorDraftKeyRef.current, lateMd);
         const liveDraft = useChatStore.getState().inputDrafts[keyAtSend];
         const untouched = liveDraft === undefined || liveDraft === draftValueAtSend;
-        if (options?.clearEditor !== false && untouched) {
+        if (options?.clearEditor !== false && untouched && editorDraftKeyRef.current === keyAtSend) {
           editorRef.current?.clearContent();
           // Scrubbed the document the user was looking at, so the caret belongs
           // back here: chat is a conversation and the next turn is typed in the
@@ -563,7 +579,8 @@ export function ChatInput({
         draftKey: keyAtSend,
         attachmentCount: uniqueActiveIds.length,
       });
-      const accepted = await onSend(
+      const dispatch = dispatchRef.current;
+      const accepted = await dispatch(
         content,
         uniqueActiveIds.length > 0 ? uniqueActiveIds : undefined,
         commitInput,
@@ -577,6 +594,21 @@ export function ChatInput({
       return true;
     },
   });
+
+  const submitWith = useCallback((dispatch: ChatInputSend) => {
+    // useComposerSubmit invokes its onSubmit synchronously before its first
+    // await, so this temporary selection is captured for this one submit. Reset
+    // it straight away: Enter after a Send now click must remain an ordinary
+    // Queue send, never inherit a stale steering intent.
+    dispatchRef.current = dispatch;
+    void submit();
+    dispatchRef.current = onSend;
+  }, [onSend, submit]);
+  const submitQueue = useCallback(() => submitWith(onSend), [onSend, submitWith]);
+  const submitNow = useCallback(() => {
+    if (!onSendNow || !sendNowEnabled) return;
+    submitWith(onSendNow);
+  }, [onSendNow, sendNowEnabled, submitWith]);
 
   const placeholder = agentAccessRevoked
     ? t(($) => $.input.placeholder_access_revoked)
@@ -697,7 +729,7 @@ export function ChatInput({
               // upload's own completion dispatch.
               commitDraft(editorDraftKeyRef.current, md);
             }}
-            onSubmit={submit}
+            onSubmit={submitQueue}
             onUploadFile={uploadEnabled ? handleUpload : undefined}
             pasteAsFileThreshold={PASTE_AS_FILE_THRESHOLD}
             onUploadingChange={uploadGate.onUploadingChange}
@@ -732,37 +764,70 @@ export function ChatInput({
           </div>
         )}
         <div className="absolute bottom-1 right-1.5 flex items-center gap-1">
-          <SubmitButton
-            onClick={submit}
-            disabled={hasNothingToSend || submitting || !!disabled || !!noAgent}
-            loading={submitting}
-            busy={gate.uploading}
+          {isRunning && !hasNothingToSend && showSendNow ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                disabled={submitting || gate.uploading || !!disabled || !!noAgent}
+                aria-busy={submitting || undefined}
+                onClick={submitQueue}
+              >
+                {t(($) => $.workflow.queue_action)}
+              </Button>
+              <span title={sendNowEnabled ? undefined : sendNowUnavailableLabel}>
+                <Button
+                  type="button"
+                  variant="default"
+                  size="xs"
+                  disabled={
+                    submitting ||
+                    gate.uploading ||
+                    !!disabled ||
+                    !!noAgent ||
+                    !sendNowEnabled
+                  }
+                  aria-busy={submitting || undefined}
+                  onClick={submitNow}
+                >
+                  {t(($) => $.workflow.send_now_action)}
+                </Button>
+              </span>
+            </>
+          ) : (
+            <SubmitButton
+              onClick={submitQueue}
+              disabled={hasNothingToSend || submitting || !!disabled || !!noAgent}
+              loading={submitting}
+              busy={gate.uploading}
             // Queue-capable runs reuse this one action slot: an empty composer
             // offers Stop, while live content swaps it to Queue Send. Older
             // servers cannot accept follow-ups, so they remain stop-only. An
             // upload blocks submit, so it also falls back to Stop rather than
             // removing chat's only cancellation path; the attachment node
             // remains the visible upload-progress surface in the editor.
-            running={
-              !!isRunning &&
-              (!allowSubmitWhileRunning || hasNothingToSend || gate.uploading)
-            }
-            onStop={onStop}
-            tooltip={gate.uploading
-              ? tEditor(($) => $.upload.in_progress)
-              : isRunning
-                ? t(($) => $.input.queue_send_tooltip)
-                : sendShortcut
-                  ? `${t(($) => $.input.send_tooltip)} · ${formatShortcut(sendShortcut)}`
+              running={
+                !!isRunning &&
+                (!allowSubmitWhileRunning || hasNothingToSend || gate.uploading)
+              }
+              onStop={onStop}
+              tooltip={gate.uploading
+                ? tEditor(($) => $.upload.in_progress)
+                : isRunning
+                  ? t(($) => $.input.queue_send_tooltip)
+                  : sendShortcut
+                    ? `${t(($) => $.input.send_tooltip)} · ${formatShortcut(sendShortcut)}`
+                    : t(($) => $.input.send_tooltip)}
+              ariaLabel={gate.uploading
+                ? tEditor(($) => $.upload.in_progress)
+                : isRunning
+                  ? t(($) => $.input.queue_send_tooltip)
                   : t(($) => $.input.send_tooltip)}
-            ariaLabel={gate.uploading
-              ? tEditor(($) => $.upload.in_progress)
-              : isRunning
-                ? t(($) => $.input.queue_send_tooltip)
-              : t(($) => $.input.send_tooltip)}
-            stopTooltip={t(($) => $.input.stop_tooltip)}
-            stopAriaLabel={t(($) => $.input.stop_tooltip)}
-          />
+              stopTooltip={t(($) => $.input.stop_tooltip)}
+              stopAriaLabel={t(($) => $.input.stop_tooltip)}
+            />
+          )}
         </div>
         {uploadEnabled && isDragOver && <FileDropOverlay />}
       </div>

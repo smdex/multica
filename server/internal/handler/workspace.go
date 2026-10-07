@@ -1228,6 +1228,20 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 			run:  func() error { return qtx.DeleteWorkspaceLeafData(ctx, requester.WorkspaceID) },
 		},
 		{
+			name: "delete issue work links",
+			run: func() error {
+				_, err := qtx.DeleteIssueWorkLinksByWorkspace(ctx, requester.WorkspaceID)
+				return err
+			},
+		},
+		{
+			name: "delete work sources",
+			run: func() error {
+				_, err := qtx.DeleteWorkSourcesByWorkspace(ctx, requester.WorkspaceID)
+				return err
+			},
+		},
+		{
 			name: "delete autopilot runs",
 			run:  func() error { return qtx.DeleteWorkspaceAutopilotRuns(ctx, requester.WorkspaceID) },
 		},
@@ -1238,6 +1252,14 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 		{
 			name: "delete autopilot quota periods",
 			run:  func() error { return qtx.DeleteWorkspaceAutopilotQuotaPeriods(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete task interactions",
+			run:  func() error { return qtx.DeleteWorkspaceTaskInteractions(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete workflow requests",
+			run:  func() error { return qtx.DeleteWorkspaceWorkflowRequests(ctx, requester.WorkspaceID) },
 		},
 		{
 			name: "delete chat messages",

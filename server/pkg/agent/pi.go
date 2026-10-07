@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,12 +21,9 @@ import (
 // JSON mode (`pi -p --mode json --session <path>`) and parsing its event
 // stream on stdout.
 //
-// It also backs the "omp" (oh-my-pi) provider — omp is a separate CLI
-// (https://omp.sh) that is a drop-in fork of pi and speaks the same JSON
-// event protocol. The daemon probes a separate `omp` binary and registers
-// it under the "omp" key; piBackend uses defaultExecutable so the fallback
-// binary name matches the provider key (pi → "pi", omp → "omp") when
-// cfg.ExecutablePath is empty.
+// The OMP runtime uses this only through an execution-only wrapper. Its
+// provider-specific native-history and interactive-control contracts have not
+// been verified, so they remain unavailable through that wrapper.
 type piBackend struct {
 	cfg               Config
 	defaultExecutable string
@@ -37,6 +35,13 @@ type piBackend struct {
 	// error. Production uses defaultPiTurnErrorGrace; tests shorten it without
 	// changing concurrent executions through package-global state.
 	turnErrorGrace time.Duration
+}
+
+func (b *piBackend) InteractionCapabilities() InteractionCapabilities {
+	if b.providerLabel == "omp" {
+		return InteractionCapabilities{}
+	}
+	return InteractionCapabilities{Steer: true, Approvals: true, Questions: true}
 }
 
 var (
@@ -348,6 +353,12 @@ func isPiToolNameByte(b byte) bool {
 }
 
 func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := validateInteractionOptions(opts); err != nil {
+		return nil, err
+	}
+	if isChatInteraction(opts) {
+		return b.executeInteractive(ctx, prompt, opts)
+	}
 	label := b.providerLabel
 	if label == "" {
 		label = "pi"
@@ -377,6 +388,14 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	// The path doubles as our opaque session identifier: we return it as
 	// SessionID and expect it back as ResumeSessionID on the next turn.
 	sessionPath := opts.ResumeSessionID
+	if requiresNativeResume(opts) {
+		if _, err := os.Stat(sessionPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("resume_unavailable: %s session file does not exist", label)
+			}
+			return nil, fmt.Errorf("resume_unavailable: inspect %s session file: %w", label, err)
+		}
+	}
 	if sessionPath == "" {
 		p, err := newPiSessionPath()
 		if err != nil {

@@ -35,6 +35,14 @@ const (
 	// the extra deferred-task lookup for clients that opt in, and an older
 	// server's missing fields make a newer daemon retain its short fallback.
 	DaemonCapabilityClaimPollHintsV1 = "claim-poll-hints-v1"
+	// DaemonCapabilityNativeSessionImportV1 advertises the native-history
+	// import contract. Both daemon and server must advertise it before the
+	// server dispatches a native-session operation.
+	DaemonCapabilityNativeSessionImportV1 = "native-session-import-v1"
+	// DaemonCapabilityChatControlsV1 advertises foreground chat controls and
+	// interaction delivery. It is deliberately separate from native import:
+	// a runtime may support one without the other.
+	DaemonCapabilityChatControlsV1 = "chat-controls-v1"
 
 	// DaemonCapabilityPlatformSkillV1 advertises that the daemon's runtime
 	// brief names the merged `multica-platform` skill instead of the
@@ -162,6 +170,10 @@ const (
 	PendingWorkKindModelList        = "model_list"
 	PendingWorkKindLocalSkills      = "local_skills"
 	PendingWorkKindLocalSkillImport = "local_skill_import"
+	// PendingWorkKindAgentWorkflow wakes the normal heartbeat path to pull
+	// durable workflow commands. The event itself contains no command and is
+	// safe to lose or duplicate.
+	PendingWorkKindAgentWorkflow = "agent_workflow"
 )
 
 // PendingWorkPayload is sent from server to daemon as a wakeup hint when a
@@ -395,6 +407,10 @@ type ChatSessionUpdatedPayload struct {
 type DaemonHeartbeatRequestPayload struct {
 	RuntimeID           string `json:"runtime_id"`
 	SupportsBatchImport bool   `json:"supports_batch_import,omitempty"`
+	// AgentWorkflowCapabilities is optional so old daemons remain compatible.
+	// Missing fields are unsupported; the server never guesses from provider
+	// names.
+	AgentWorkflowCapabilities *AgentWorkflowCapabilities `json:"agent_workflow_capabilities,omitempty"`
 }
 
 // DaemonHeartbeatAckPayload is the server's reply to DaemonHeartbeatRequestPayload.
@@ -423,6 +439,11 @@ type DaemonHeartbeatAckPayload struct {
 	// that don't know this field silently ignore it (standard JSON behavior)
 	// and fall back to the singular PendingLocalSkillImport above.
 	PendingLocalSkillImports []DaemonHeartbeatPendingLocalSkillImport `json:"pending_local_skill_imports,omitempty"`
+	// PendingAgentWorkflow is claimed atomically from the server's durable
+	// request ledger before this acknowledgment is sent. A command that has
+	// crossed the pending -> running boundary is never side-effect replayed on
+	// an ambiguous transport disconnect.
+	PendingAgentWorkflow []AgentWorkflowCommand `json:"pending_agent_workflow,omitempty"`
 }
 
 // HeartbeatStatusRuntimeGone is the ack Status used when the runtime row no

@@ -94,6 +94,11 @@ import type {
   TaskMessagePayload,
   Attachment,
   ChatSession,
+  ChatControls,
+  ChatInteractionResponse,
+  ChatInteractionsResponse,
+  WorkflowCapabilities,
+  WorkflowRequest,
   ChatPinnedAgent,
   ChatMessage,
   ChatMessagesPage,
@@ -231,6 +236,11 @@ import type {
   CreateCommentSubIssueManualRequest,
   CreateCommentSubIssueAgentRequest,
   CreateCommentSubIssueRequest,
+  WorkSource,
+  IssueWorkLink,
+  CreateWorkSourceParams,
+  UpdateWorkSourceParams,
+  CreateIssueWorkLinkParams,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import type {
@@ -259,8 +269,12 @@ import {
   ChatMessageListSchema,
   ChatMessagesPageSchema,
   ChatPendingTaskSchema,
+  ChatControlsSchema,
+  ChatInteractionsResponseSchema,
   ChatSessionListSchema,
   ChatSessionSchema,
+  WorkflowCapabilitiesSchema,
+  WorkflowRequestSchema,
   PrioritizeQueuedChatTaskResponseSchema,
   SendChatMessageResponseSchema,
   StartMikaOnboardingResponseSchema,
@@ -287,8 +301,12 @@ import {
   EMPTY_ATTACHMENT,
   EMPTY_CHAT_MESSAGE_LIST,
   EMPTY_CHAT_PENDING_TASK,
+  EMPTY_CHAT_CONTROLS,
+  EMPTY_CHAT_INTERACTIONS,
   EMPTY_CHAT_SESSION,
   EMPTY_CHAT_SESSION_LIST,
+  EMPTY_WORKFLOW_CAPABILITIES,
+  EMPTY_WORKFLOW_REQUEST,
   EMPTY_PRIORITIZE_QUEUED_CHAT_TASK_RESPONSE,
   EMPTY_CLOUD_RUNTIME_NODE,
   EMPTY_CLOUD_RUNTIME_NODE_LIST,
@@ -475,6 +493,10 @@ import {
   type IssueView,
   type IssueViewPreference,
   type CreateIssueViewRequest,
+  WorkSourceSchema,
+  WorkSourceListSchema,
+  IssueWorkLinkSchema,
+  IssueWorkLinkListSchema,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -3673,6 +3695,7 @@ export class ApiClient {
       agent_id: string;
       title?: string;
       project_id?: string | null;
+      interaction_mode?: "chat" | "autonomous";
     },
     workspaceSlug?: string,
   ): Promise<ChatSession> {
@@ -3709,7 +3732,10 @@ export class ApiClient {
 
   async updateChatSession(
     id: string,
-    data: { title: string } | { project_id: string | null },
+    data:
+      | { title: string }
+      | { project_id: string | null }
+      | { interaction_mode: "chat" | "autonomous" },
   ): Promise<ChatSession> {
     return this.fetch(`/api/chat/sessions/${id}`, {
       method: "PATCH",
@@ -3728,6 +3754,98 @@ export class ApiClient {
     return this.fetch(`/api/chat/sessions/${id}/archive`, {
       method: "PATCH",
       body: JSON.stringify({ archived }),
+    });
+  }
+
+  /** Runtime-reported capabilities; missing fields remain unavailable. */
+  async getAgentWorkflowCapabilities(runtimeId: string): Promise<WorkflowCapabilities> {
+    const raw = await this.fetch<unknown>(
+      `/api/runtimes/${runtimeId}/agent-workflow-capabilities`,
+    );
+    return parseWithFallback(raw, WorkflowCapabilitiesSchema, EMPTY_WORKFLOW_CAPABILITIES, {
+      endpoint: "GET /api/runtimes/:id/agent-workflow-capabilities",
+    });
+  }
+
+  async listNativeSessions(
+    runtimeId: string,
+    data: { request_id: string; cursor: string | null; limit: number },
+  ): Promise<WorkflowRequest> {
+    const raw = await this.fetch<unknown>(`/api/runtimes/${runtimeId}/native-sessions/list`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, WorkflowRequestSchema, EMPTY_WORKFLOW_REQUEST, {
+      endpoint: "POST /api/runtimes/:id/native-sessions/list",
+    });
+  }
+
+  async importNativeSession(
+    runtimeId: string,
+    data: { request_id: string; session_ref: string; revision: string; agent_id: string },
+  ): Promise<WorkflowRequest> {
+    const raw = await this.fetch<unknown>(`/api/runtimes/${runtimeId}/native-sessions/import`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, WorkflowRequestSchema, EMPTY_WORKFLOW_REQUEST, {
+      endpoint: "POST /api/runtimes/:id/native-sessions/import",
+    });
+  }
+
+  async getAgentWorkflowRequest(runtimeId: string, requestId: string): Promise<WorkflowRequest> {
+    const raw = await this.fetch<unknown>(
+      `/api/runtimes/${runtimeId}/agent-workflow-requests/${requestId}`,
+    );
+    return parseWithFallback(raw, WorkflowRequestSchema, EMPTY_WORKFLOW_REQUEST, {
+      endpoint: "GET /api/runtimes/:id/agent-workflow-requests/:requestId",
+    });
+  }
+
+  async getChatControls(sessionId: string): Promise<ChatControls> {
+    const raw = await this.fetch<unknown>(`/api/chat-sessions/${sessionId}/controls`);
+    return parseWithFallback(raw, ChatControlsSchema, EMPTY_CHAT_CONTROLS, {
+      endpoint: "GET /api/chat-sessions/:id/controls",
+    });
+  }
+
+  async steerChatSession(
+    sessionId: string,
+    data: { request_id: string; task_id: string; run_id: string; turn_id: string; content: string },
+  ): Promise<WorkflowRequest> {
+    const raw = await this.fetch<unknown>(`/api/chat-sessions/${sessionId}/steer`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, WorkflowRequestSchema, EMPTY_WORKFLOW_REQUEST, {
+      endpoint: "POST /api/chat-sessions/:id/steer",
+    });
+  }
+
+  async listChatInteractions(sessionId: string): Promise<ChatInteractionsResponse> {
+    const raw = await this.fetch<unknown>(`/api/chat-sessions/${sessionId}/interactions`);
+    return parseWithFallback(raw, ChatInteractionsResponseSchema, EMPTY_CHAT_INTERACTIONS, {
+      endpoint: "GET /api/chat-sessions/:id/interactions",
+    });
+  }
+
+  async respondToChatInteraction(
+    sessionId: string,
+    interactionId: string,
+    data: {
+      request_id: string;
+      task_id: string;
+      run_id: string;
+      turn_id: string;
+      response: ChatInteractionResponse;
+    },
+  ): Promise<WorkflowRequest> {
+    const raw = await this.fetch<unknown>(
+      `/api/chat-sessions/${sessionId}/interactions/${interactionId}/respond`,
+      { method: "POST", body: JSON.stringify(data) },
+    );
+    return parseWithFallback(raw, WorkflowRequestSchema, EMPTY_WORKFLOW_REQUEST, {
+      endpoint: "POST /api/chat-sessions/:id/interactions/:id/respond",
     });
   }
 
@@ -5226,5 +5344,100 @@ export class ApiClient {
       EMPTY_REDEEM_TELEGRAM_BINDING_TOKEN_RESPONSE,
       { endpoint: "POST /api/telegram/binding/redeem" },
     );
+  }
+
+  // Work sources (see ../types/work-source). All methods take an explicit
+  // workspace UUID and pin the request to it: the server resolves
+  // X-Workspace-Slug BEFORE X-Workspace-ID, and authHeaders() stamps the slug
+  // of whatever workspace the user has switched to, so a per-call UUID must
+  // explicitly clear the slug or a concurrent workspace switch silently
+  // redirects the call.
+  private workspaceUuidHeaders(workspaceUuid?: string): Record<string, string> | undefined {
+    if (!workspaceUuid) return workspaceHeader(undefined);
+    return { "X-Workspace-ID": workspaceUuid, "X-Workspace-Slug": "" };
+  }
+
+  /** Strict parse: a list/mutation response that fails its schema rejects
+   *  rather than degrading to a fake empty list or phantom source. */
+  private parseWorkSourceResponse<T>(raw: unknown, schema: ZodType<T>, endpoint: string): T {
+    const parsed = parseWithFallback<T | null>(raw, schema, null, { endpoint });
+    if (parsed === null) throw new Error(`Malformed response from ${endpoint}`);
+    return parsed;
+  }
+
+  async listWorkSources(params: { workspaceUuid: string; signal?: AbortSignal }): Promise<WorkSource[]> {
+    const raw = await this.fetch<unknown>("/api/work-sources", {
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      signal: params.signal,
+    });
+    return this.parseWorkSourceResponse<WorkSource[]>(raw, WorkSourceListSchema, "GET /api/work-sources");
+  }
+
+  async createWorkSource(params: { workspaceUuid: string; body: CreateWorkSourceParams }): Promise<WorkSource> {
+    const raw = await this.fetch<unknown>("/api/work-sources", {
+      method: "POST",
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      body: JSON.stringify(params.body),
+    });
+    return this.parseWorkSourceResponse<WorkSource>(raw, WorkSourceSchema, "POST /api/work-sources");
+  }
+
+  async updateWorkSource(params: {
+    workspaceUuid: string;
+    sourceId: string;
+    body: UpdateWorkSourceParams;
+  }): Promise<WorkSource> {
+    const raw = await this.fetch<unknown>(`/api/work-sources/${params.sourceId}`, {
+      method: "PATCH",
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      body: JSON.stringify(params.body),
+    });
+    return this.parseWorkSourceResponse<WorkSource>(raw, WorkSourceSchema, "PATCH /api/work-sources/:id");
+  }
+
+  async deleteWorkSource(params: { workspaceUuid: string; sourceId: string }): Promise<void> {
+    // 204 with no body; a non-2xx throws via fetchRaw, so deletion cannot
+    // silently "succeed" against a malformed response.
+    await this.fetch<void>(`/api/work-sources/${params.sourceId}`, {
+      method: "DELETE",
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+    });
+  }
+
+  async listIssueWorkLinks(params: {
+    workspaceUuid: string;
+    /** Exactly one of issueId/sourceId is required by the server. */
+    issueId?: string;
+    sourceId?: string;
+    signal?: AbortSignal;
+  }): Promise<IssueWorkLink[]> {
+    const search = new URLSearchParams();
+    if (params.issueId) search.set("issue_id", params.issueId);
+    if (params.sourceId) search.set("source_id", params.sourceId);
+    const qs = search.toString();
+    const raw = await this.fetch<unknown>(`/api/issue-work-links${qs ? `?${qs}` : ""}`, {
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      signal: params.signal,
+    });
+    return this.parseWorkSourceResponse<IssueWorkLink[]>(raw, IssueWorkLinkListSchema, "GET /api/issue-work-links");
+  }
+
+  async createIssueWorkLink(params: {
+    workspaceUuid: string;
+    body: CreateIssueWorkLinkParams;
+  }): Promise<IssueWorkLink> {
+    const raw = await this.fetch<unknown>("/api/issue-work-links", {
+      method: "POST",
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+      body: JSON.stringify(params.body),
+    });
+    return this.parseWorkSourceResponse<IssueWorkLink>(raw, IssueWorkLinkSchema, "POST /api/issue-work-links");
+  }
+
+  async deleteIssueWorkLink(params: { workspaceUuid: string; linkId: string }): Promise<void> {
+    await this.fetch<void>(`/api/issue-work-links/${params.linkId}`, {
+      method: "DELETE",
+      headers: this.workspaceUuidHeaders(params.workspaceUuid),
+    });
   }
 }

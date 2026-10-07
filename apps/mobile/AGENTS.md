@@ -8,6 +8,7 @@ These rules apply only to `apps/mobile/`, in addition to the [root instructions]
 - Use `package.json` and the lockfile for current versions. Mobile pins Expo/React Native dependencies rather than taking the root React catalog.
 - Add SDK-aligned native packages with `pnpm exec expo install <package>` from this directory. Check compatibility before adding other dependencies; do not pick versions from memory.
 - Follow [README.md](README.md) for setup, simulator/device builds, and environment variants. Keep iOS scripts routed through `scripts/ios-run.sh`, which prebuilds before running iOS so config plugins are reapplied. Preserve the caller's `APP_ENV`; avoid clean prebuilds in the normal edit loop.
+- Android standalone development builds use the pinned `android-nixpkgs` SDK in `devenv`, then Expo prebuild and Gradle as documented in `README.md`. Keep variant package IDs and development-only cleartext access in `app.config.ts`, and native toolchain overrides in Expo config plugins, not generated Android files. Keep the configured NDK aligned with the pinned SDK and native dependency runtime requirements.
 - Generated `ios/` and `android/` directories are not source. Check new source paths with `git check-ignore -v <path>` when they could match the root ignore rules, particularly `data/`, `build/`, and `bin/`.
 
 ## Behavioral Parity

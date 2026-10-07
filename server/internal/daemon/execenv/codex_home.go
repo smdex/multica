@@ -46,6 +46,11 @@ var codexModelsCacheConfigFiles = []string{
 // CodexHomeOptions carries optional inputs for prepareCodexHomeWithOpts that
 // affect the generated per-task config.toml.
 type CodexHomeOptions struct {
+	// SharedHome pins the canonical provider home this task is seeded from.
+	// Imported native sessions carry this value from preparation so an ambient
+	// CODEX_HOME change after a daemon restart cannot make a strict resume read
+	// a different account's history.
+	SharedHome string
 	// CodexVersion is the detected Codex CLI version (e.g. "0.121.0"). Empty
 	// means unknown; on macOS, unknown is treated as "probably broken" so the
 	// daemon falls back to danger-full-access for network access. See
@@ -196,7 +201,10 @@ func classifyPerTaskWindowsSandbox(configFile string, configSyncErr error, share
 // config files are copied (isolated). The per-task config.toml gets a
 // daemon-managed sandbox block picked by codexSandboxPolicyFor.
 func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *slog.Logger) error {
-	sharedHome := resolveSharedCodexHome()
+	sharedHome := opts.SharedHome
+	if sharedHome == "" {
+		sharedHome = resolveSharedCodexHome()
+	}
 	freshHome := false
 	if _, err := os.Lstat(codexHome); os.IsNotExist(err) {
 		freshHome = true
@@ -332,6 +340,29 @@ func resolveSharedCodexHome() string {
 		return filepath.Join(os.TempDir(), ".codex") // last resort fallback
 	}
 	return filepath.Join(home, ".codex")
+}
+
+// CanonicalSharedCodexHome resolves the provider home once at native-session
+// import. A strict resumed task must use this durable identity instead of
+// resolving the daemon's ambient CODEX_HOME again after a restart.
+func CanonicalSharedCodexHome() (string, error) {
+	home := resolveSharedCodexHome()
+	abs, err := filepath.Abs(home)
+	if err != nil {
+		return "", fmt.Errorf("make shared CODEX_HOME absolute: %w", err)
+	}
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize shared CODEX_HOME: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("stat shared CODEX_HOME: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("shared CODEX_HOME is not a directory")
+	}
+	return canonical, nil
 }
 
 // codexSessionStateGlobs are the session-derived SQLite state Codex builds
@@ -588,6 +619,13 @@ func prepareCodexSessionsDir(codexHome, sharedHome string, opts CodexHomeOptions
 	fi, err := os.Lstat(dst)
 	switch {
 	case os.IsNotExist(err):
+		// An imported chat begins in a fresh task root, but its fork already
+		// exists in the shared provider home. Mount its single rollout into the
+		// per-chat store before Codex initializes; otherwise thread/resume sees
+		// an empty fresh home and silently starts a new thread.
+		if opts.ResumeSessionID != "" && storeDir != "" {
+			return linkCodexSessionsToStore(dst, storeDir, sharedSessions, opts.ResumeSessionID, logger)
+		}
 		return os.MkdirAll(dst, 0o755) // fresh managed task — empty local dir
 	case err != nil:
 		return fmt.Errorf("stat sessions dir %s: %w", dst, err)
@@ -683,11 +721,21 @@ func touchCodexSessionStore(storeDir string, logger *slog.Logger) {
 // PruneCodexSessionStores never reclaims a store mid-mount, closing the
 // stat→remove race the mtime refresh alone cannot (MUL-4424).
 func CodexSessionStorePath(profile string, task TaskContextForEnv) string {
+	return CodexSessionStorePathForHome("", profile, task)
+}
+
+// CodexSessionStorePathForHome returns the conversation store beneath
+// sharedHome. An empty home follows the current CODEX_HOME resolution; strict
+// imported sessions pass their preparation-time canonical home instead.
+func CodexSessionStorePathForHome(sharedHome, profile string, task TaskContextForEnv) string {
 	key := codexSessionStoreKey(profile, task)
 	if key == "" {
 		return ""
 	}
-	return codexSessionStoreDir(resolveSharedCodexHome(), key)
+	if sharedHome == "" {
+		sharedHome = resolveSharedCodexHome()
+	}
+	return codexSessionStoreDir(sharedHome, key)
 }
 
 // sameCodexPath reports whether two filesystem paths refer to the same location,

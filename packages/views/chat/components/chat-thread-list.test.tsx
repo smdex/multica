@@ -1,9 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "@multica/core/i18n/react";
 import type { Agent, ChatSession } from "@multica/core/types";
 import enChat from "../../locales/en/chat.json";
-import enIssues from "../../locales/en/issues.json";
 
 // --- Mocks ------------------------------------------------------------------
 // The list no longer owns the archive-advance behavior — the parent (ChatPage)
@@ -58,7 +58,7 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
 
 import { ChatThreadList } from "./chat-thread-list";
 
-const TEST_RESOURCES = { en: { chat: enChat, issues: enIssues } };
+const TEST_RESOURCES = { en: { chat: enChat } };
 
 function makeSession(overrides: Partial<ChatSession> & Pick<ChatSession, "id">): ChatSession {
   return {
@@ -218,6 +218,131 @@ describe("ChatThreadList agent identity", () => {
 
     expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
     expect(screen.getByText("Still identifiable by its preview")).toBeInTheDocument();
+  });
+});
+
+describe("ChatThreadList history filters", () => {
+  const alpha = { id: "agent-1", name: "Alpha", runtime_config: { provider: "codex" } } as unknown as Agent;
+  const beta = { id: "agent-2", name: "Beta", runtime_config: { provider: "codex" } } as unknown as Agent;
+  const filteredSessions = [
+    makeSession({
+      id: "title-match",
+      title: "Design review",
+      last_message: {
+        content: "Unrelated preview",
+        role: "assistant",
+        created_at: "2026-07-08T03:00:00Z",
+      },
+    }),
+    makeSession({
+      id: "preview-match",
+      agent_id: "agent-2",
+      title: "Release notes",
+      last_message: {
+        content: "Ship the checkpoint",
+        role: "assistant",
+        created_at: "2026-07-08T02:00:00Z",
+      },
+    }),
+  ];
+
+  it("filters chat titles and visible message previews", () => {
+    renderList(null, {
+      renderedSessions: filteredSessions,
+      renderedAgents: [alpha, beta],
+    });
+
+    const search = screen.getByRole("searchbox", { name: enChat.list.search_aria });
+    fireEvent.change(search, { target: { value: "checkpoint" } });
+
+    expect(screen.queryByText("Design review")).not.toBeInTheDocument();
+    expect(screen.getByText("Release notes")).toBeInTheDocument();
+  });
+
+  it("filters by exact Multica agent identity when agents share a provider", async () => {
+    renderList(null, {
+      renderedSessions: filteredSessions,
+      renderedAgents: [alpha, beta],
+    });
+
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("combobox", { name: enChat.list.agent_filter_aria }),
+    );
+    await user.click(await screen.findByRole("option", { name: "Beta" }));
+
+    expect(screen.queryByText("Design review")).not.toBeInTheDocument();
+    expect(screen.getByText("Release notes")).toBeInTheDocument();
+  });
+
+  it("shows a resettable empty result", () => {
+    renderList(null, {
+      renderedSessions: filteredSessions,
+      renderedAgents: [alpha, beta],
+    });
+
+    fireEvent.change(screen.getByRole("searchbox", { name: enChat.list.search_aria }), {
+      target: { value: "does not exist" },
+    });
+
+    expect(screen.getByText(enChat.list.filtered_empty)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: enChat.list.clear_filters }));
+
+    expect(screen.getByText("Design review")).toBeInTheDocument();
+    expect(screen.getByText("Release notes")).toBeInTheDocument();
+  });
+
+  it("searches the archived history without changing its archive controls", () => {
+    const archived = makeSession({
+      id: "archived-match",
+      title: "Archived migration plan",
+      status: "archived",
+      agent_id: "agent-2",
+      last_message: {
+        content: "Archive-specific preview",
+        role: "assistant",
+        created_at: "2026-07-08T01:00:00Z",
+      },
+    });
+    renderList(null, {
+      renderedSessions: [...filteredSessions, archived],
+      renderedAgents: [alpha, beta],
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: new RegExp(`^${enChat.list.archived_title}`) }),
+    );
+    fireEvent.change(screen.getByRole("searchbox", { name: enChat.list.search_aria }), {
+      target: { value: "migration" },
+    });
+
+    expect(screen.getByText("Archived migration plan")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: enChat.list.unarchive })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: enChat.session_history.row_delete_aria })).toBeInTheDocument();
+  });
+
+  it("keeps pinned and unread row signals after filtering", () => {
+    const unreadPinned = makeSession({
+      id: "unread-pinned",
+      title: "Pinned inbox follow-up",
+      pinned: true,
+      unread_count: 3,
+      has_unread: true,
+      last_message: {
+        content: "Needs review",
+        role: "assistant",
+        created_at: "2026-07-08T03:00:00Z",
+      },
+    });
+    renderList(null, { renderedSessions: [unreadPinned], renderedAgents: [alpha] });
+
+    fireEvent.change(screen.getByRole("searchbox", { name: enChat.list.search_aria }), {
+      target: { value: "inbox" },
+    });
+
+    expect(screen.getByLabelText(enChat.list.pinned)).toBeInTheDocument();
+    expect(screen.getByLabelText(enChat.session_history.row_subtitle.new_reply)).toHaveTextContent("3");
+    expect(screen.getByRole("button", { name: enChat.list.unpin })).toBeInTheDocument();
   });
 });
 
