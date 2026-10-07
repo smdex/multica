@@ -178,6 +178,10 @@ func (s *WorkSourceService) UpdateWorkSource(ctx context.Context, workspaceID pg
 		Name: cfg.Name, Enabled: enabled,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
+		// The SQL predicate atomically refuses enabling pending native intent.
+		if current, lookupErr := s.Queries.GetWorkSourceInWorkspace(ctx, db.GetWorkSourceInWorkspaceParams{ID: sourceID, WorkspaceID: workspaceID}); lookupErr == nil && current.Mode == "native" && !current.NativeEnrolledAt.Valid && cfg.Enabled != nil && *cfg.Enabled {
+			return db.WorkSource{}, ErrNativeEnrollmentConflict
+		}
 		return db.WorkSource{}, ErrWorkSourceNotFound
 	}
 	if err != nil {

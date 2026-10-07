@@ -47,6 +47,50 @@ SET name = @name,
     config_revision = config_revision + 1,
     updated_at = now()
 WHERE id = @id AND workspace_id = @workspace_id
+  AND NOT (COALESCE(sqlc.narg(enabled), enabled) AND mode = 'native' AND native_enrolled_at IS NULL)
+RETURNING *;
+
+-- name: LockNativeSourceRequest :exec
+SELECT pg_advisory_xact_lock(hashtextextended('native-source-request:' || @request_key::text, 0));
+
+-- name: GetNativeSourceByRequest :one
+SELECT * FROM work_source
+WHERE workspace_id = @workspace_id AND native_request_id = @native_request_id
+FOR UPDATE;
+
+-- name: CreateNativeSourceIntent :one
+INSERT INTO work_source (
+    id, workspace_id, runtime_id, daemon_id, name, mode, enabled,
+    source_handle, created_by, native_request_id, native_request_hash,
+    native_enrollment_id, native_owner_member_id, native_runtime_created_at
+)
+VALUES (
+    @id, @workspace_id, @runtime_id, @daemon_id, @name, 'native', FALSE,
+    @source_handle, @created_by, @native_request_id, @native_request_hash,
+    @native_enrollment_id, @native_owner_member_id, @native_runtime_created_at
+)
+RETURNING *;
+
+-- name: ApproveNativeSourceEnrollment :one
+UPDATE work_source
+SET native_manifest_hash = @native_manifest_hash,
+    native_approved_at = COALESCE(native_approved_at, clock_timestamp()),
+    updated_at = clock_timestamp()
+WHERE id = @id AND workspace_id = @workspace_id AND mode = 'native'
+  AND native_enrollment_id = @native_enrollment_id
+  AND config_revision = @config_revision
+  AND (native_manifest_hash IS NULL OR native_manifest_hash = @native_manifest_hash)
+RETURNING *;
+
+-- name: FinalizeNativeSourceEnrollment :one
+UPDATE work_source
+SET native_enrolled_at = COALESCE(native_enrolled_at, clock_timestamp()),
+    updated_at = clock_timestamp()
+WHERE id = @id AND workspace_id = @workspace_id AND mode = 'native'
+  AND native_enrollment_id = @native_enrollment_id
+  AND config_revision = @config_revision
+  AND native_manifest_hash = @native_manifest_hash
+  AND native_approved_at IS NOT NULL
 RETURNING *;
 
 -- name: UpdateWorkSourceHealth :exec

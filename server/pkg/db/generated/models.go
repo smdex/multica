@@ -1791,21 +1791,29 @@ type WebhookDelivery struct {
 }
 
 type WorkSource struct {
-	ID             pgtype.UUID        `json:"id"`
-	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
-	ProjectID      pgtype.UUID        `json:"project_id"`
-	RuntimeID      pgtype.UUID        `json:"runtime_id"`
-	DaemonID       string             `json:"daemon_id"`
-	Name           string             `json:"name"`
-	Mode           string             `json:"mode"`
-	Enabled        bool               `json:"enabled"`
-	SourceHandle   string             `json:"source_handle"`
-	ConfigRevision int32              `json:"config_revision"`
-	LastHealth     pgtype.Text        `json:"last_health"`
-	LastError      pgtype.Text        `json:"last_error"`
-	CreatedBy      pgtype.UUID        `json:"created_by"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID                     pgtype.UUID        `json:"id"`
+	WorkspaceID            pgtype.UUID        `json:"workspace_id"`
+	ProjectID              pgtype.UUID        `json:"project_id"`
+	RuntimeID              pgtype.UUID        `json:"runtime_id"`
+	DaemonID               string             `json:"daemon_id"`
+	Name                   string             `json:"name"`
+	Mode                   string             `json:"mode"`
+	Enabled                bool               `json:"enabled"`
+	SourceHandle           string             `json:"source_handle"`
+	ConfigRevision         int32              `json:"config_revision"`
+	LastHealth             pgtype.Text        `json:"last_health"`
+	LastError              pgtype.Text        `json:"last_error"`
+	CreatedBy              pgtype.UUID        `json:"created_by"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	NativeRequestID        pgtype.UUID        `json:"native_request_id"`
+	NativeRequestHash      pgtype.Text        `json:"native_request_hash"`
+	NativeEnrollmentID     pgtype.UUID        `json:"native_enrollment_id"`
+	NativeOwnerMemberID    pgtype.UUID        `json:"native_owner_member_id"`
+	NativeRuntimeCreatedAt pgtype.Timestamptz `json:"native_runtime_created_at"`
+	NativeManifestHash     pgtype.Text        `json:"native_manifest_hash"`
+	NativeApprovedAt       pgtype.Timestamptz `json:"native_approved_at"`
+	NativeEnrolledAt       pgtype.Timestamptz `json:"native_enrolled_at"`
 }
 
 type WorkSourceCommand struct {

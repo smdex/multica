@@ -11,6 +11,63 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const approveNativeSourceEnrollment = `-- name: ApproveNativeSourceEnrollment :one
+UPDATE work_source
+SET native_manifest_hash = $1,
+    native_approved_at = COALESCE(native_approved_at, clock_timestamp()),
+    updated_at = clock_timestamp()
+WHERE id = $2 AND workspace_id = $3 AND mode = 'native'
+  AND native_enrollment_id = $4
+  AND config_revision = $5
+  AND (native_manifest_hash IS NULL OR native_manifest_hash = $1)
+RETURNING id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at, native_request_id, native_request_hash, native_enrollment_id, native_owner_member_id, native_runtime_created_at, native_manifest_hash, native_approved_at, native_enrolled_at
+`
+
+type ApproveNativeSourceEnrollmentParams struct {
+	NativeManifestHash pgtype.Text `json:"native_manifest_hash"`
+	ID                 pgtype.UUID `json:"id"`
+	WorkspaceID        pgtype.UUID `json:"workspace_id"`
+	NativeEnrollmentID pgtype.UUID `json:"native_enrollment_id"`
+	ConfigRevision     int32       `json:"config_revision"`
+}
+
+func (q *Queries) ApproveNativeSourceEnrollment(ctx context.Context, arg ApproveNativeSourceEnrollmentParams) (WorkSource, error) {
+	row := q.db.QueryRow(ctx, approveNativeSourceEnrollment,
+		arg.NativeManifestHash,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.NativeEnrollmentID,
+		arg.ConfigRevision,
+	)
+	var i WorkSource
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ProjectID,
+		&i.RuntimeID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Mode,
+		&i.Enabled,
+		&i.SourceHandle,
+		&i.ConfigRevision,
+		&i.LastHealth,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NativeRequestID,
+		&i.NativeRequestHash,
+		&i.NativeEnrollmentID,
+		&i.NativeOwnerMemberID,
+		&i.NativeRuntimeCreatedAt,
+		&i.NativeManifestHash,
+		&i.NativeApprovedAt,
+		&i.NativeEnrolledAt,
+	)
+	return i, err
+}
+
 const clearWorkSourceProject = `-- name: ClearWorkSourceProject :exec
 UPDATE work_source
 SET project_id = NULL, config_revision = config_revision + 1, updated_at = now()
@@ -69,6 +126,79 @@ func (q *Queries) CreateIssueWorkLink(ctx context.Context, arg CreateIssueWorkLi
 	return i, err
 }
 
+const createNativeSourceIntent = `-- name: CreateNativeSourceIntent :one
+INSERT INTO work_source (
+    id, workspace_id, runtime_id, daemon_id, name, mode, enabled,
+    source_handle, created_by, native_request_id, native_request_hash,
+    native_enrollment_id, native_owner_member_id, native_runtime_created_at
+)
+VALUES (
+    $1, $2, $3, $4, $5, 'native', FALSE,
+    $6, $7, $8, $9,
+    $10, $11, $12
+)
+RETURNING id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at, native_request_id, native_request_hash, native_enrollment_id, native_owner_member_id, native_runtime_created_at, native_manifest_hash, native_approved_at, native_enrolled_at
+`
+
+type CreateNativeSourceIntentParams struct {
+	ID                     pgtype.UUID        `json:"id"`
+	WorkspaceID            pgtype.UUID        `json:"workspace_id"`
+	RuntimeID              pgtype.UUID        `json:"runtime_id"`
+	DaemonID               string             `json:"daemon_id"`
+	Name                   string             `json:"name"`
+	SourceHandle           string             `json:"source_handle"`
+	CreatedBy              pgtype.UUID        `json:"created_by"`
+	NativeRequestID        pgtype.UUID        `json:"native_request_id"`
+	NativeRequestHash      pgtype.Text        `json:"native_request_hash"`
+	NativeEnrollmentID     pgtype.UUID        `json:"native_enrollment_id"`
+	NativeOwnerMemberID    pgtype.UUID        `json:"native_owner_member_id"`
+	NativeRuntimeCreatedAt pgtype.Timestamptz `json:"native_runtime_created_at"`
+}
+
+func (q *Queries) CreateNativeSourceIntent(ctx context.Context, arg CreateNativeSourceIntentParams) (WorkSource, error) {
+	row := q.db.QueryRow(ctx, createNativeSourceIntent,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.RuntimeID,
+		arg.DaemonID,
+		arg.Name,
+		arg.SourceHandle,
+		arg.CreatedBy,
+		arg.NativeRequestID,
+		arg.NativeRequestHash,
+		arg.NativeEnrollmentID,
+		arg.NativeOwnerMemberID,
+		arg.NativeRuntimeCreatedAt,
+	)
+	var i WorkSource
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ProjectID,
+		&i.RuntimeID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Mode,
+		&i.Enabled,
+		&i.SourceHandle,
+		&i.ConfigRevision,
+		&i.LastHealth,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NativeRequestID,
+		&i.NativeRequestHash,
+		&i.NativeEnrollmentID,
+		&i.NativeOwnerMemberID,
+		&i.NativeRuntimeCreatedAt,
+		&i.NativeManifestHash,
+		&i.NativeApprovedAt,
+		&i.NativeEnrolledAt,
+	)
+	return i, err
+}
+
 const createWorkSource = `-- name: CreateWorkSource :one
 INSERT INTO work_source (
     id, workspace_id, project_id, runtime_id, daemon_id,
@@ -78,7 +208,7 @@ VALUES (
     $1, $2, $3, $4, $5,
     $6, $7, $8, $9, $10
 )
-RETURNING id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at
+RETURNING id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at, native_request_id, native_request_hash, native_enrollment_id, native_owner_member_id, native_runtime_created_at, native_manifest_hash, native_approved_at, native_enrolled_at
 `
 
 type CreateWorkSourceParams struct {
@@ -124,6 +254,14 @@ func (q *Queries) CreateWorkSource(ctx context.Context, arg CreateWorkSourcePara
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.NativeRequestID,
+		&i.NativeRequestHash,
+		&i.NativeEnrollmentID,
+		&i.NativeOwnerMemberID,
+		&i.NativeRuntimeCreatedAt,
+		&i.NativeManifestHash,
+		&i.NativeApprovedAt,
+		&i.NativeEnrolledAt,
 	)
 	return i, err
 }
@@ -229,6 +367,63 @@ func (q *Queries) DeleteWorkSourcesByWorkspace(ctx context.Context, workspaceID 
 	return result.RowsAffected(), nil
 }
 
+const finalizeNativeSourceEnrollment = `-- name: FinalizeNativeSourceEnrollment :one
+UPDATE work_source
+SET native_enrolled_at = COALESCE(native_enrolled_at, clock_timestamp()),
+    updated_at = clock_timestamp()
+WHERE id = $1 AND workspace_id = $2 AND mode = 'native'
+  AND native_enrollment_id = $3
+  AND config_revision = $4
+  AND native_manifest_hash = $5
+  AND native_approved_at IS NOT NULL
+RETURNING id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at, native_request_id, native_request_hash, native_enrollment_id, native_owner_member_id, native_runtime_created_at, native_manifest_hash, native_approved_at, native_enrolled_at
+`
+
+type FinalizeNativeSourceEnrollmentParams struct {
+	ID                 pgtype.UUID `json:"id"`
+	WorkspaceID        pgtype.UUID `json:"workspace_id"`
+	NativeEnrollmentID pgtype.UUID `json:"native_enrollment_id"`
+	ConfigRevision     int32       `json:"config_revision"`
+	NativeManifestHash pgtype.Text `json:"native_manifest_hash"`
+}
+
+func (q *Queries) FinalizeNativeSourceEnrollment(ctx context.Context, arg FinalizeNativeSourceEnrollmentParams) (WorkSource, error) {
+	row := q.db.QueryRow(ctx, finalizeNativeSourceEnrollment,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.NativeEnrollmentID,
+		arg.ConfigRevision,
+		arg.NativeManifestHash,
+	)
+	var i WorkSource
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ProjectID,
+		&i.RuntimeID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Mode,
+		&i.Enabled,
+		&i.SourceHandle,
+		&i.ConfigRevision,
+		&i.LastHealth,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NativeRequestID,
+		&i.NativeRequestHash,
+		&i.NativeEnrollmentID,
+		&i.NativeOwnerMemberID,
+		&i.NativeRuntimeCreatedAt,
+		&i.NativeManifestHash,
+		&i.NativeApprovedAt,
+		&i.NativeEnrolledAt,
+	)
+	return i, err
+}
+
 const getIssueWorkLinkInWorkspace = `-- name: GetIssueWorkLinkInWorkspace :one
 SELECT id, workspace_id, issue_id, source_id, native_id, created_by, created_at FROM issue_work_link
 WHERE id = $1 AND workspace_id = $2
@@ -254,8 +449,50 @@ func (q *Queries) GetIssueWorkLinkInWorkspace(ctx context.Context, arg GetIssueW
 	return i, err
 }
 
+const getNativeSourceByRequest = `-- name: GetNativeSourceByRequest :one
+SELECT id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at, native_request_id, native_request_hash, native_enrollment_id, native_owner_member_id, native_runtime_created_at, native_manifest_hash, native_approved_at, native_enrolled_at FROM work_source
+WHERE workspace_id = $1 AND native_request_id = $2
+FOR UPDATE
+`
+
+type GetNativeSourceByRequestParams struct {
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	NativeRequestID pgtype.UUID `json:"native_request_id"`
+}
+
+func (q *Queries) GetNativeSourceByRequest(ctx context.Context, arg GetNativeSourceByRequestParams) (WorkSource, error) {
+	row := q.db.QueryRow(ctx, getNativeSourceByRequest, arg.WorkspaceID, arg.NativeRequestID)
+	var i WorkSource
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ProjectID,
+		&i.RuntimeID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Mode,
+		&i.Enabled,
+		&i.SourceHandle,
+		&i.ConfigRevision,
+		&i.LastHealth,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NativeRequestID,
+		&i.NativeRequestHash,
+		&i.NativeEnrollmentID,
+		&i.NativeOwnerMemberID,
+		&i.NativeRuntimeCreatedAt,
+		&i.NativeManifestHash,
+		&i.NativeApprovedAt,
+		&i.NativeEnrolledAt,
+	)
+	return i, err
+}
+
 const getWorkSourceInWorkspace = `-- name: GetWorkSourceInWorkspace :one
-SELECT id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at FROM work_source
+SELECT id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at, native_request_id, native_request_hash, native_enrollment_id, native_owner_member_id, native_runtime_created_at, native_manifest_hash, native_approved_at, native_enrolled_at FROM work_source
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -283,12 +520,20 @@ func (q *Queries) GetWorkSourceInWorkspace(ctx context.Context, arg GetWorkSourc
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.NativeRequestID,
+		&i.NativeRequestHash,
+		&i.NativeEnrollmentID,
+		&i.NativeOwnerMemberID,
+		&i.NativeRuntimeCreatedAt,
+		&i.NativeManifestHash,
+		&i.NativeApprovedAt,
+		&i.NativeEnrolledAt,
 	)
 	return i, err
 }
 
 const getWorkSourceOwnerConflict = `-- name: GetWorkSourceOwnerConflict :one
-SELECT id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at FROM work_source
+SELECT id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at, native_request_id, native_request_hash, native_enrollment_id, native_owner_member_id, native_runtime_created_at, native_manifest_hash, native_approved_at, native_enrolled_at FROM work_source
 WHERE workspace_id = $1 AND daemon_id = $2 AND source_handle = $3
 `
 
@@ -319,6 +564,14 @@ func (q *Queries) GetWorkSourceOwnerConflict(ctx context.Context, arg GetWorkSou
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.NativeRequestID,
+		&i.NativeRequestHash,
+		&i.NativeEnrollmentID,
+		&i.NativeOwnerMemberID,
+		&i.NativeRuntimeCreatedAt,
+		&i.NativeManifestHash,
+		&i.NativeApprovedAt,
+		&i.NativeEnrolledAt,
 	)
 	return i, err
 }
@@ -402,7 +655,7 @@ func (q *Queries) ListIssueWorkLinksBySource(ctx context.Context, arg ListIssueW
 }
 
 const listWorkSourcesByWorkspace = `-- name: ListWorkSourcesByWorkspace :many
-SELECT id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at FROM work_source
+SELECT id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at, native_request_id, native_request_hash, native_enrollment_id, native_owner_member_id, native_runtime_created_at, native_manifest_hash, native_approved_at, native_enrolled_at FROM work_source
 WHERE workspace_id = $1
 ORDER BY created_at
 `
@@ -432,6 +685,14 @@ func (q *Queries) ListWorkSourcesByWorkspace(ctx context.Context, workspaceID pg
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.NativeRequestID,
+			&i.NativeRequestHash,
+			&i.NativeEnrollmentID,
+			&i.NativeOwnerMemberID,
+			&i.NativeRuntimeCreatedAt,
+			&i.NativeManifestHash,
+			&i.NativeApprovedAt,
+			&i.NativeEnrolledAt,
 		); err != nil {
 			return nil, err
 		}
@@ -441,6 +702,15 @@ func (q *Queries) ListWorkSourcesByWorkspace(ctx context.Context, workspaceID pg
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockNativeSourceRequest = `-- name: LockNativeSourceRequest :exec
+SELECT pg_advisory_xact_lock(hashtextextended('native-source-request:' || $1::text, 0))
+`
+
+func (q *Queries) LockNativeSourceRequest(ctx context.Context, requestKey string) error {
+	_, err := q.db.Exec(ctx, lockNativeSourceRequest, requestKey)
+	return err
 }
 
 const lockWorkSourceForWrite = `-- name: LockWorkSourceForWrite :one
@@ -473,7 +743,8 @@ SET name = $1,
     config_revision = config_revision + 1,
     updated_at = now()
 WHERE id = $3 AND workspace_id = $4
-RETURNING id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at
+  AND NOT (COALESCE($2, enabled) AND mode = 'native' AND native_enrolled_at IS NULL)
+RETURNING id, workspace_id, project_id, runtime_id, daemon_id, name, mode, enabled, source_handle, config_revision, last_health, last_error, created_by, created_at, updated_at, native_request_id, native_request_hash, native_enrollment_id, native_owner_member_id, native_runtime_created_at, native_manifest_hash, native_approved_at, native_enrolled_at
 `
 
 type UpdateWorkSourceConfigParams struct {
@@ -513,6 +784,14 @@ func (q *Queries) UpdateWorkSourceConfig(ctx context.Context, arg UpdateWorkSour
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.NativeRequestID,
+		&i.NativeRequestHash,
+		&i.NativeEnrollmentID,
+		&i.NativeOwnerMemberID,
+		&i.NativeRuntimeCreatedAt,
+		&i.NativeManifestHash,
+		&i.NativeApprovedAt,
+		&i.NativeEnrolledAt,
 	)
 	return i, err
 }

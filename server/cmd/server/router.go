@@ -1575,6 +1575,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/tasks/{id}/plugin-mcp/{contributionId}/credential", h.ResolvePluginMCPCredential)
 
 		r.Post("/runtimes/{runtimeId}/source-read-token", workSourceCommands.MintSourceReadToken)
+		r.Post("/runtimes/{runtimeId}/source-enrollments", workSourceCommands.CreateNativeSourceIntent)
+		r.Post("/runtimes/{runtimeId}/source-enrollments/{sourceId}/token", workSourceCommands.MintSourceEnrollmentToken)
+		r.Post("/runtimes/{runtimeId}/source-enrollments/{sourceId}/finalize", workSourceCommands.FinalizeNativeSourceEnrollment)
 		r.Get("/runtimes/{runtimeId}/work-source-commands", workSourceCommands.ListPendingWorkSourceCommands)
 		r.Post("/runtimes/{runtimeId}/work-source-commands/{commandId}/claim", workSourceCommands.ClaimWorkSourceCommand)
 		r.Post("/runtimes/{runtimeId}/work-source-commands/{commandId}/result", workSourceCommands.ReportWorkSourceCommand)

@@ -22,21 +22,27 @@ type WorkSourceHandler struct {
 }
 
 type workSourceResponse struct {
-	ID             string `json:"id"`
-	WorkspaceID    string `json:"workspace_id"`
-	ProjectID      string `json:"project_id,omitempty"`
-	RuntimeID      string `json:"runtime_id"`
-	DaemonID       string `json:"daemon_id"`
-	Name           string `json:"name"`
-	Mode           string `json:"mode"`
-	Enabled        bool   `json:"enabled"`
-	SourceHandle   string `json:"source_handle"`
-	ConfigRevision int32  `json:"config_revision"`
-	LastHealth     string `json:"last_health,omitempty"`
-	LastError      string `json:"last_error,omitempty"`
-	CreatedBy      string `json:"created_by,omitempty"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
+	ID                     string `json:"id"`
+	WorkspaceID            string `json:"workspace_id"`
+	ProjectID              string `json:"project_id,omitempty"`
+	RuntimeID              string `json:"runtime_id"`
+	DaemonID               string `json:"daemon_id"`
+	Name                   string `json:"name"`
+	Mode                   string `json:"mode"`
+	Enabled                bool   `json:"enabled"`
+	SourceHandle           string `json:"source_handle"`
+	ConfigRevision         int32  `json:"config_revision"`
+	LastHealth             string `json:"last_health,omitempty"`
+	LastError              string `json:"last_error,omitempty"`
+	CreatedBy              string `json:"created_by,omitempty"`
+	CreatedAt              string `json:"created_at"`
+	UpdatedAt              string `json:"updated_at"`
+	NativeEnrollmentID     string `json:"native_enrollment_id,omitempty"`
+	NativeEnrollmentStatus string `json:"native_enrollment_status,omitempty"`
+	NativeManifestHash     string `json:"native_manifest_hash,omitempty"`
+	NativeOwnerMemberID    string `json:"native_owner_member_id,omitempty"`
+	NativeRuntimeCreatedAt string `json:"native_runtime_created_at,omitempty"`
+	NativeEnrolledAt       string `json:"native_enrolled_at,omitempty"`
 }
 
 type createWorkSourceRequest struct {
@@ -105,6 +111,8 @@ func handleWorkSourceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "physical source already registered")
 	case errors.Is(err, service.ErrWorkSourceInvalidInput):
 		writeError(w, http.StatusBadRequest, "invalid work source request")
+	case errors.Is(err, service.ErrNativeEnrollmentConflict):
+		writeError(w, http.StatusConflict, "native source awaits enrollment approval")
 	case isUniqueViolation(err):
 		writeError(w, http.StatusConflict, "physical source already registered")
 	default:
@@ -343,6 +351,19 @@ func workSourceToResponse(s db.WorkSource) workSourceResponse {
 	}
 	if s.CreatedBy.Valid {
 		resp.CreatedBy = uuidToString(s.CreatedBy)
+	}
+	if s.NativeEnrollmentID.Valid {
+		resp.NativeEnrollmentID = s.NativeEnrollmentID.String()
+		resp.NativeEnrollmentStatus = "pending"
+		resp.NativeOwnerMemberID = s.NativeOwnerMemberID.String()
+		resp.NativeRuntimeCreatedAt = s.NativeRuntimeCreatedAt.Time.UTC().Format(time.RFC3339Nano)
+		if s.NativeManifestHash.Valid {
+			resp.NativeManifestHash = s.NativeManifestHash.String
+		}
+		if s.NativeEnrolledAt.Valid {
+			resp.NativeEnrollmentStatus = "enrolled"
+			resp.NativeEnrolledAt = s.NativeEnrolledAt.Time.UTC().Format(time.RFC3339Nano)
+		}
 	}
 	return resp
 }

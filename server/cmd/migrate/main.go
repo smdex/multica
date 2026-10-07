@@ -142,6 +142,7 @@ var pgBigmOperatorClass = extensionOperatorClass{
 var concurrentIndexCleanups = map[string]string{
 	"598_workflow_run_id_index":                                 "workflow_run_id_idx",
 	"599_workflow_run_request_index":                            "workflow_run_request_idx",
+	"601_work_source_native_request_index":                      "work_source_native_request_idx",
 	"594_work_source_command_id_index":                          "work_source_command_id_idx",
 	"595_work_source_command_request_index":                     "work_source_command_request_idx",
 	"596_work_source_command_expiry_index":                      "work_source_command_expiry_idx",
