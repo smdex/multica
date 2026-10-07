@@ -303,14 +303,14 @@ func normalizeProvider(s string) string {
 // daemon_id-scoped rows that show up in the machine grouping, so both call this.
 //
 // Only fresh inserts with no name of their own and a daemon_id participate;
-// existing rows keep whatever they already have. A lookup/update error is
-// non-fatal — registration must still succeed — so the input row is returned
-// unchanged on any failure.
-func (h *Handler) inheritMachineCustomName(ctx context.Context, rt db.AgentRuntime, inserted bool) db.AgentRuntime {
+// existing rows keep whatever they already have. On lookup/update failure the
+// input row is returned unchanged. The outer transaction still rejects a
+// database error that prevents commit.
+func (h *Handler) inheritMachineCustomName(ctx context.Context, qtx *db.Queries, rt db.AgentRuntime, inserted bool) db.AgentRuntime {
 	if !inserted || rt.CustomName.Valid || !rt.DaemonID.Valid {
 		return rt
 	}
-	names, err := h.Queries.ListDaemonCustomNames(ctx, db.ListDaemonCustomNamesParams{
+	names, err := qtx.ListDaemonCustomNames(ctx, db.ListDaemonCustomNamesParams{
 		WorkspaceID: rt.WorkspaceID,
 		DaemonID:    rt.DaemonID,
 		ExcludeID:   rt.ID,
@@ -322,7 +322,7 @@ func (h *Handler) inheritMachineCustomName(ctx context.Context, rt db.AgentRunti
 	if !ok {
 		return rt
 	}
-	updated, err := h.Queries.UpdateAgentRuntimeCustomName(ctx, db.UpdateAgentRuntimeCustomNameParams{
+	updated, err := qtx.UpdateAgentRuntimeCustomName(ctx, db.UpdateAgentRuntimeCustomNameParams{
 		CustomName: pgtype.Text{String: shared, Valid: true},
 		ID:         rt.ID,
 	})
@@ -332,47 +332,22 @@ func (h *Handler) inheritMachineCustomName(ctx context.Context, rt db.AgentRunti
 	return updated
 }
 
-var errRuntimeProfileDisabled = errors.New("runtime profile is disabled")
+var errRuntimeRegistrationOwner = errors.New("runtime registration owner mismatch")
 
-// upsertRuntimeWithProfile serializes custom-runtime registration with profile
-// deletion. The profile row remains KEY SHARE locked until the runtime upsert
-// commits; DeleteRuntimeProfile takes a conflicting UPDATE lock before it
-// enumerates runtime rows. This closes the stale-read window where deletion
-// could miss an instance inserted by a concurrently registering daemon.
+// upsertRuntimeWithProfile uses the registration transaction's profile lock.
+// Registration prelocks every requested profile before any runtime row, matching
+// profile deletion's profile-before-runtime order for the whole request.
 func (h *Handler) upsertRuntimeWithProfile(
 	ctx context.Context,
-	workspaceID, profileID pgtype.UUID,
+	qtx *db.Queries,
+	profile db.RuntimeProfile,
 	build func(db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams,
-) (db.UpsertAgentRuntimeWithProfileRow, db.RuntimeProfile, error) {
-	var row db.UpsertAgentRuntimeWithProfileRow
-	var profile db.RuntimeProfile
-
-	tx, err := h.TxStarter.Begin(ctx)
-	if err != nil {
-		return row, profile, fmt.Errorf("begin profile runtime registration: %w", err)
+) (db.UpsertAgentRuntimeWithProfileRow, error) {
+	row, err := qtx.UpsertAgentRuntimeWithProfile(ctx, build(profile))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return row, errRuntimeRegistrationOwner
 	}
-	defer tx.Rollback(ctx)
-	qtx := h.Queries.WithTx(tx)
-
-	profile, err = qtx.LockRuntimeProfileForRegistration(ctx, db.LockRuntimeProfileForRegistrationParams{
-		ID:          profileID,
-		WorkspaceID: workspaceID,
-	})
-	if err != nil {
-		return row, profile, fmt.Errorf("lock runtime profile: %w", err)
-	}
-	if !profile.Enabled {
-		return row, profile, errRuntimeProfileDisabled
-	}
-
-	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, build(profile))
-	if err != nil {
-		return row, profile, fmt.Errorf("upsert profile runtime: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return row, profile, fmt.Errorf("commit profile runtime registration: %w", err)
-	}
-	return row, profile, nil
+	return row, err
 }
 
 // sharedDaemonCustomName returns the machine-level name shared by all of a
@@ -431,17 +406,24 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	req.WorkspaceID = uuidToString(wsUUID)
 
-	// Verify workspace access and resolve owner.
-	// Daemon tokens (mdt_) prove workspace access directly; OwnerID will be zero
-	// (the SQL COALESCE preserves any existing owner on upsert).
-	// PAT/JWT tokens require a membership check and set OwnerID from the member.
+	// Daemon tokens may reconnect only as their authenticated machine. They do
+	// not carry user ownership authority; user credentials resolve membership.
 	var ownerID pgtype.UUID
 	if daemonWsID := middleware.DaemonWorkspaceIDFromContext(r.Context()); daemonWsID != "" {
 		if daemonWsID != req.WorkspaceID {
 			writeError(w, http.StatusNotFound, "workspace not found")
 			return
 		}
-		// ownerID stays zero — COALESCE keeps the existing owner on upsert.
+		if middleware.DaemonIDFromContext(r.Context()) != req.DaemonID {
+			writeError(w, http.StatusForbidden, "daemon identity does not match registration")
+			return
+		}
+		for _, legacyID := range req.LegacyDaemonIDs {
+			if strings.TrimSpace(legacyID) != "" {
+				writeError(w, http.StatusForbidden, "legacy runtime merge requires owner authentication")
+				return
+			}
+		}
 	} else {
 		member, ok := h.requireWorkspaceMember(w, r, req.WorkspaceID, "workspace not found")
 		if !ok {
@@ -450,13 +432,120 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		ownerID = member.UserID
 	}
 
-	ws, err := h.Queries.GetWorkspace(r.Context(), wsUUID)
+	tx, err := h.TxStarter.Begin(r.Context())
 	if err != nil {
-		writeError(w, http.StatusNotFound, "workspace not found")
+		writeError(w, http.StatusInternalServerError, "failed to begin registration")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+	// Revoke takes this lock FIRST, then workspace, then sorted runtimes.
+	if ownerID.Valid {
+		if err := qtx.LockSubscriberWrites(r.Context(), db.LockSubscriberWritesParams{WorkspaceID: wsUUID, UserID: ownerID}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to lock registration membership")
+			return
+		}
+	}
+	if _, err := qtx.LockWorkspaceForChatSessionCreate(r.Context(), wsUUID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to lock registration workspace")
+		}
+		return
+	}
+	if err := qtx.LockDaemonRegistration(r.Context(), db.LockDaemonRegistrationParams{WorkspaceID: wsUUID, DaemonID: req.DaemonID}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock daemon registration")
+		return
+	}
+	// Every profile lock precedes EVERY runtime lock, including when a builtin
+	// runtime appears first in the request. Missing/disabled failed profiles
+	// retain their existing best-effort skip behavior.
+	profileRequired := make(map[string]bool)
+	for i := range req.Runtimes {
+		req.Runtimes[i].ProfileID = strings.TrimSpace(req.Runtimes[i].ProfileID)
+		if req.Runtimes[i].ProfileID != "" {
+			profileRequired[req.Runtimes[i].ProfileID] = true
+		}
+	}
+	for i := range req.FailedProfiles {
+		req.FailedProfiles[i].ProfileID = strings.TrimSpace(req.FailedProfiles[i].ProfileID)
+		if id := req.FailedProfiles[i].ProfileID; id != "" {
+			if _, exists := profileRequired[id]; !exists {
+				profileRequired[id] = false
+			}
+		}
+	}
+	profileIDs := make([]string, 0, len(profileRequired))
+	for id := range profileRequired {
+		profileIDs = append(profileIDs, id)
+	}
+	sort.Strings(profileIDs)
+	profiles := make(map[string]db.RuntimeProfile)
+	for _, id := range profileIDs {
+		profileUUID, ok := parseUUIDOrBadRequest(w, id, "profile_id")
+		if !ok {
+			return
+		}
+		profile, err := qtx.LockRuntimeProfileForRegistration(r.Context(), db.LockRuntimeProfileForRegistrationParams{ID: profileUUID, WorkspaceID: wsUUID})
+		if errors.Is(err, pgx.ErrNoRows) && !profileRequired[id] {
+			continue
+		}
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusBadRequest, "unknown runtime profile: "+id)
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to lock runtime profile")
+			}
+			return
+		}
+		if !profile.Enabled {
+			if !profileRequired[id] {
+				continue
+			}
+			writeError(w, http.StatusConflict, "runtime profile is disabled: "+id)
+			return
+		}
+		profiles[id] = profile
+	}
+	legacyIDs := make([]string, 0, len(req.LegacyDaemonIDs))
+	for _, id := range req.LegacyDaemonIDs {
+		if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
+			legacyIDs = append(legacyIDs, id)
+		}
+	}
+	locked, err := qtx.LockDaemonRegistrationRuntimes(r.Context(), db.LockDaemonRegistrationRuntimesParams{
+		WorkspaceID: wsUUID, DaemonID: strToText(req.DaemonID), LegacyDaemonIds: legacyIDs,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock registration runtimes")
+		return
+	}
+	if ownerID.Valid {
+		if _, err := qtx.LockWorkflowMember(r.Context(), db.LockWorkflowMemberParams{WorkspaceID: wsUUID, UserID: ownerID}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "workspace not found")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to validate registration membership")
+			}
+			return
+		}
+		for _, runtime := range locked {
+			if !runtime.OwnerID.Valid || runtime.OwnerID != ownerID {
+				writeError(w, http.StatusForbidden, "runtime registration requires its current owner")
+				return
+			}
+		}
+	}
+	ws, err := qtx.GetWorkspace(r.Context(), wsUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load registration workspace")
 		return
 	}
 
 	resp := make([]AgentRuntimeResponse, 0, len(req.Runtimes))
+	var registeredEvents []analytics.Event
+	var mergedRuntimeIDs []string
 	for _, runtime := range req.Runtimes {
 		provider := normalizeProvider(runtime.Type)
 		if provider == "" {
@@ -495,17 +584,13 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		isCustom := strings.TrimSpace(runtime.ProfileID) != ""
 
 		if isCustom {
-			profileUUID, pok := parseUUIDOrBadRequest(w, strings.TrimSpace(runtime.ProfileID), "profile_id")
-			if !pok {
-				return
-			}
-			// The profile must exist in this workspace and be enabled. Trust
-			// the profile's stored runtime identity over the daemon-sent type so
-			// the provider used for task routing cannot drift from the profile.
-			prow, profile, err := h.upsertRuntimeWithProfile(
+			profile := profiles[runtime.ProfileID]
+			profileUUID := profile.ID
+			// Use the locked profile's stored provider identity, not daemon input.
+			prow, err := h.upsertRuntimeWithProfile(
 				r.Context(),
-				wsUUID,
-				profileUUID,
+				qtx,
+				profile,
 				func(profile db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams {
 					return db.UpsertAgentRuntimeWithProfileParams{
 						WorkspaceID: wsUUID,
@@ -521,12 +606,8 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 					}
 				},
 			)
-			if errors.Is(err, pgx.ErrNoRows) {
-				writeError(w, http.StatusBadRequest, "unknown runtime profile: "+runtime.ProfileID)
-				return
-			}
-			if errors.Is(err, errRuntimeProfileDisabled) {
-				writeError(w, http.StatusConflict, "runtime profile is disabled: "+runtime.ProfileID)
+			if errors.Is(err, errRuntimeRegistrationOwner) {
+				writeError(w, http.StatusForbidden, "runtime registration requires its current owner")
 				return
 			}
 			if err != nil {
@@ -564,7 +645,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				ProfileID:      prow.ProfileID,
 			}
 		} else {
-			row, err := h.Queries.UpsertAgentRuntime(r.Context(), db.UpsertAgentRuntimeParams{
+			row, err := qtx.UpsertAgentRuntime(r.Context(), db.UpsertAgentRuntimeParams{
 				WorkspaceID: wsUUID,
 				DaemonID:    strToText(req.DaemonID),
 				Name:        name,
@@ -575,6 +656,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				Metadata:    metadata,
 				OwnerID:     ownerID,
 			})
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusForbidden, "runtime registration requires its current owner")
+				return
+			}
 			if err != nil {
 				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeFailed(
 					uuidToString(ownerID),
@@ -613,12 +698,12 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		// A brand-new runtime on an already-named machine inherits the machine's
 		// shared custom name so the machine title stays stable as providers come
 		// and go (MUL-4217). Shared with the failed-profile path below.
-		registered = h.inheritMachineCustomName(r.Context(), registered, inserted)
+		registered = h.inheritMachineCustomName(r.Context(), qtx, registered, inserted)
 
 		// Inserted is false for normal daemon reconnects/upserts, so
 		// runtime_ready is a first-ready-per-runtime-row signal.
 		if inserted {
-			obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeRegistered(
+			registeredEvents = append(registeredEvents, analytics.RuntimeRegistered(
 				uuidToString(ownerID),
 				req.WorkspaceID,
 				uuidToString(registered.ID),
@@ -628,7 +713,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				req.CLIVersion,
 			))
 			if registered.Status == "online" {
-				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeReady(
+				registeredEvents = append(registeredEvents, analytics.RuntimeReady(
 					uuidToString(ownerID),
 					req.WorkspaceID,
 					uuidToString(registered.ID),
@@ -647,11 +732,21 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		//
 		// Only built-in runtimes participate: legacy rows predate custom
 		// profiles, so a profile-keyed instance never has a hostname-derived
-		// ancestor to merge, and mergeLegacyRuntimes scopes by provider alone
-		// (no profile_id), which could otherwise fold a built-in row into a
-		// custom one of the same provider.
+		// ancestor to merge. Both the finder and merge guard exclude profile
+		// rows, keeping built-in and custom-runtime identities separate.
 		if !isCustom {
-			h.mergeLegacyRuntimes(r, registered, provider, req.LegacyDaemonIDs)
+			merged, err := h.mergeLegacyRuntimes(r.Context(), qtx, registered, ownerID, provider, req.LegacyDaemonIDs)
+			if err != nil {
+				if errors.Is(err, errRuntimeRegistrationOwner) {
+					writeError(w, http.StatusForbidden, "legacy runtime merge requires its current owner")
+				} else if errors.Is(err, errRuntimeMergeFenced) {
+					writeError(w, http.StatusConflict, "legacy runtime merge is blocked by its current bindings")
+				} else {
+					writeError(w, http.StatusInternalServerError, "failed to merge legacy runtimes")
+				}
+				return
+			}
+			mergedRuntimeIDs = append(mergedRuntimeIDs, merged...)
 		}
 
 		resp = append(resp, runtimeToResponse(registered))
@@ -661,19 +756,20 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		if profileID == "" {
 			continue
 		}
-		profileUUID, pok := parseUUIDOrBadRequest(w, profileID, "profile_id")
-		if !pok {
-			return
+		profile, exists := profiles[profileID]
+		if !exists {
+			continue
 		}
+		profileUUID := profile.ID
 		reason := strings.TrimSpace(failed.Reason)
 		if reason == "" {
 			reason = "custom runtime command could not be resolved"
 		}
 		commandName := strings.TrimSpace(failed.CommandName)
-		prow, _, err := h.upsertRuntimeWithProfile(
+		prow, err := h.upsertRuntimeWithProfile(
 			r.Context(),
-			wsUUID,
-			profileUUID,
+			qtx,
+			profile,
 			func(profile db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams {
 				name := profile.DisplayName
 				if req.DeviceName != "" {
@@ -712,15 +808,20 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				}
 			},
 		)
+		if errors.Is(err, errRuntimeRegistrationOwner) {
+			writeError(w, http.StatusForbidden, "runtime registration requires its current owner")
+			return
+		}
 		if err != nil {
 			slog.Warn("failed to record runtime profile registration failure",
 				"workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID,
 				"profile_id", profileID, "error", err)
-			continue
+			writeError(w, http.StatusInternalServerError, "failed to record runtime profile registration failure")
+			return
 		}
 		// Keep the failed-profile row consistent with the machine's name so it
 		// doesn't drag the machine title back to the hostname (MUL-4217).
-		h.inheritMachineCustomName(r.Context(), db.AgentRuntime{
+		h.inheritMachineCustomName(r.Context(), qtx, db.AgentRuntime{
 			ID:          prow.ID,
 			WorkspaceID: prow.WorkspaceID,
 			DaemonID:    prow.DaemonID,
@@ -728,6 +829,16 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		}, prow.Inserted)
 	}
 
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit registration")
+		return
+	}
+	for _, event := range registeredEvents {
+		obsmetrics.RecordEvent(h.Analytics, h.Metrics, event)
+	}
+	for _, runtimeID := range mergedRuntimeIDs {
+		h.NotifyRuntimeGone(runtimeID)
+	}
 	slog.Info("daemon registered", "workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID, "runtimes_count", len(resp))
 
 	h.publish(protocol.EventDaemonRegister, req.WorkspaceID, "system", "", map[string]any{
@@ -758,41 +869,37 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 // precisely when case-duplicate rows exist — which is the bug we're fixing.
 // We also dedupe across legacy ids so overlapping candidates (e.g. `foo` and
 // `foo.local` both resolving to the same stored row) don't double-process.
-func (h *Handler) mergeLegacyRuntimes(r *http.Request, registered db.AgentRuntime, provider string, legacyIDs []string) {
+func (h *Handler) mergeLegacyRuntimes(ctx context.Context, qtx *db.Queries, registered db.AgentRuntime, ownerID pgtype.UUID, provider string, legacyIDs []string) ([]string, error) {
 	newID := uuidToString(registered.ID)
-	merged := make(map[string]struct{})
-
+	seen := make(map[string]struct{})
+	var merged []string
 	for _, legacyID := range legacyIDs {
 		legacyID = strings.TrimSpace(legacyID)
 		if legacyID == "" {
 			continue
 		}
-
-		matches, err := h.Queries.FindLegacyRuntimesByDaemonID(r.Context(), db.FindLegacyRuntimesByDaemonIDParams{
-			WorkspaceID: registered.WorkspaceID,
-			Provider:    provider,
-			DaemonID:    legacyID,
+		matches, err := qtx.FindLegacyRuntimesByDaemonID(ctx, db.FindLegacyRuntimesByDaemonIDParams{
+			WorkspaceID: registered.WorkspaceID, Provider: provider, DaemonID: legacyID,
 		})
 		if err != nil {
-			slog.Warn("legacy runtime merge: lookup failed", "legacy_daemon_id", legacyID, "error", err)
-			continue
+			return nil, err
 		}
 		for _, old := range matches {
 			oldID := uuidToString(old.ID)
 			if oldID == newID {
 				continue
 			}
-			if _, seen := merged[oldID]; seen {
+			if _, exists := seen[oldID]; exists {
 				continue
 			}
-			merged[oldID] = struct{}{}
-
-			if err := h.mergeLegacyRuntime(r.Context(), registered.ID, old.ID, legacyID, provider); err != nil {
-				slog.Warn("legacy runtime merge failed",
-					"legacy_daemon_id", legacyID, "old_runtime_id", oldID, "new_runtime_id", newID, "error", err)
+			seen[oldID] = struct{}{}
+			if err := mergeLegacyRuntimeInTx(ctx, qtx, registered.ID, old.ID, ownerID, legacyID); err != nil {
+				return nil, err
 			}
+			merged = append(merged, oldID)
 		}
 	}
+	return merged, nil
 }
 
 // errRuntimeMergeFenced reports that the task-write fence refused the
@@ -837,13 +944,30 @@ func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRunti
 	}
 	defer tx.Rollback(ctx)
 	qtx := h.Queries.WithTx(tx)
+	// This standalone entry point is used by internal callers. Pin its target
+	// owner, then revalidate BOTH rows under the same locks as registration.
+	target, err := qtx.GetAgentRuntime(ctx, newRuntimeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errRuntimeMergeFenced
+	}
+	if err != nil {
+		return err
+	}
+	if err := mergeLegacyRuntimeInTx(ctx, qtx, newRuntimeID, oldRuntimeID, target.OwnerID, legacyID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit merge: %w", err)
+	}
+	h.NotifyRuntimeGone(uuidToString(oldRuntimeID))
+	slog.Info("legacy runtime merged", "old_runtime_id", uuidToString(oldRuntimeID), "new_runtime_id", uuidToString(newRuntimeID), "provider", provider)
+	return nil
+}
 
-	// Fence, in the same order every task write uses: workspace row first, then the
-	// owner rows. Without the FOR UPDATE on the runtimes, a concurrent enqueue
-	// against the OLD runtime slipped through after the task scan — writers hold
-	// only FOR KEY SHARE on the workspace, and so did this merge, and two KEY SHARE
-	// locks do not conflict — and DeleteAgentRuntime below then removed that
-	// brand-new task through ON DELETE CASCADE.
+// mergeLegacyRuntimeInTx shares the registration transaction. Its caller
+// publishes runtime-gone only after commit; an ownership failure is never a
+// best-effort merge that leaves earlier registration rows committed.
+func mergeLegacyRuntimeInTx(ctx context.Context, qtx *db.Queries, newRuntimeID, oldRuntimeID, ownerID pgtype.UUID, legacyID string) error {
 	runtimeIDs := []pgtype.UUID{oldRuntimeID, newRuntimeID}
 	if err := qtx.LockWorkspaceForRuntimeMerge(ctx, runtimeIDs); err != nil {
 		return fmt.Errorf("lock workspace: %w", err)
@@ -853,13 +977,20 @@ func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRunti
 		return fmt.Errorf("lock runtimes: %w", err)
 	}
 	if len(locked) != len(runtimeIDs) {
-		// One of them went away while we were queueing for the lock; the fence
-		// inside the reassignment would refuse anyway.
 		return errRuntimeMergeFenced
 	}
 	oldRuntime, err := qtx.GetAgentRuntime(ctx, oldRuntimeID)
 	if err != nil {
-		return fmt.Errorf("load legacy runtime work source scope: %w", err)
+		return err
+	}
+	newRuntime, err := qtx.GetAgentRuntime(ctx, newRuntimeID)
+	if err != nil {
+		return err
+	}
+	if !ownerID.Valid || !oldRuntime.OwnerID.Valid || !newRuntime.OwnerID.Valid ||
+		oldRuntime.OwnerID != ownerID || newRuntime.OwnerID != ownerID ||
+		oldRuntime.WorkspaceID != newRuntime.WorkspaceID || oldRuntime.ProfileID.Valid || newRuntime.ProfileID.Valid {
+		return errRuntimeRegistrationOwner
 	}
 	hasSources, err := qtx.RuntimeHasWorkSources(ctx, db.RuntimeHasWorkSourcesParams{RuntimeID: oldRuntimeID, WorkspaceID: oldRuntime.WorkspaceID})
 	if err != nil {
@@ -868,52 +999,22 @@ func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRunti
 	if hasSources {
 		return errRuntimeMergeFenced
 	}
-
-	reassignment, err := qtx.ReassignTasksToRuntime(ctx, db.ReassignTasksToRuntimeParams{
-		NewRuntimeID: newRuntimeID,
-		OldRuntimeID: oldRuntimeID,
-	})
+	reassignment, err := qtx.ReassignTasksToRuntime(ctx, db.ReassignTasksToRuntimeParams{NewRuntimeID: newRuntimeID, OldRuntimeID: oldRuntimeID})
 	if err != nil {
 		return fmt.Errorf("reassign tasks: %w", err)
 	}
 	if !reassignment.FenceOk {
 		return errRuntimeMergeFenced
 	}
-
-	agents, err := qtx.ReassignAgentsToRuntime(ctx, db.ReassignAgentsToRuntimeParams{
-		NewRuntimeID: newRuntimeID,
-		OldRuntimeID: oldRuntimeID,
-	})
-	if err != nil {
+	if _, err := qtx.ReassignAgentsToRuntime(ctx, db.ReassignAgentsToRuntimeParams{NewRuntimeID: newRuntimeID, OldRuntimeID: oldRuntimeID}); err != nil {
 		return fmt.Errorf("reassign agents: %w", err)
 	}
-
-	// Inside the transaction this can no longer be best-effort: a failed statement
-	// poisons the transaction, so it either lands with the rest of the merge or the
-	// merge is rolled back.
-	if err := qtx.RecordRuntimeLegacyDaemonID(ctx, db.RecordRuntimeLegacyDaemonIDParams{
-		ID:             newRuntimeID,
-		LegacyDaemonID: strToText(legacyID),
-	}); err != nil {
+	if err := qtx.RecordRuntimeLegacyDaemonID(ctx, db.RecordRuntimeLegacyDaemonIDParams{ID: newRuntimeID, LegacyDaemonID: strToText(legacyID)}); err != nil {
 		return fmt.Errorf("record legacy daemon_id: %w", err)
 	}
 	if err := qtx.DeleteAgentRuntime(ctx, oldRuntimeID); err != nil {
 		return fmt.Errorf("delete old runtime: %w", err)
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit merge: %w", err)
-	}
-	h.NotifyRuntimeGone(uuidToString(oldRuntimeID))
-
-	slog.Info("legacy runtime merged",
-		"legacy_daemon_id", legacyID,
-		"old_runtime_id", uuidToString(oldRuntimeID),
-		"new_runtime_id", uuidToString(newRuntimeID),
-		"provider", provider,
-		"agents_reassigned", agents,
-		"tasks_reassigned", reassignment.ReassignedTasks,
-	)
 	return nil
 }
 

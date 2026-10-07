@@ -23,7 +23,7 @@ User authorized implementation on October 7, 2026. Reviewed design.md is the acc
 
 ## Checks and review
 
-Each task's file targets, regression cases and observed done conditions are specified in design.md sections6-8. Run narrow checks first via `devenv shell --`, record exact results and skips, then broaden `make test`, `pnpm typecheck`, `pnpm lint`, `pnpm test` and targeted Playwright against exact built server/daemon. Inspect DB skips. Root checks do not verify mobile.
+Each task's file targets, regression cases and observed done conditions are specified in design.md sections6-8. Run narrow checks first via `devenv shell --`, record exact results and skips, then broaden backend and frontend checks when relevant. Exercise nonvisual production-router, CLI, daemon/process and PostgreSQL boundaries against the exact built milestone. The user's October 7 instruction assigns all browser/visual acceptance to them: do not run Playwright or browser-agent tests. Inspect DB skips. Root frontend checks do not verify mobile.
 
 Independent code review must examine caller inventory, auth/claim/incarnation fences, crash windows, source write capabilities, malformed-response tests, migration/index rules and legacy regressions. Mint changed source snapshots with required symbols through waggle, resolve/read coverage, record accepted/rejected. Use td dependencies and review handoffs, do not self-approve substantive work.
 

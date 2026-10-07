@@ -66,6 +66,23 @@ FOR UPDATE;
 SELECT * FROM agent_runtime
 WHERE id = $1 AND workspace_id = $2;
 
+-- name: LockDaemonRegistration :exec
+-- Registration serializes before profile/runtime locks. Membership revocation
+-- still uses LockSubscriberWrites first, followed by the workspace lock.
+SELECT pg_advisory_xact_lock(
+    hashtext('daemon-registration:' || (sqlc.arg(workspace_id)::uuid)::text),
+    hashtext(lower(sqlc.arg(daemon_id)::text))
+);
+
+-- name: LockDaemonRegistrationRuntimes :many
+-- Lock the addressed machine and legacy candidates together, in UUID order,
+-- before any upsert or merge can acquire a second runtime lock.
+SELECT * FROM agent_runtime
+WHERE workspace_id = @workspace_id
+  AND (daemon_id = @daemon_id OR lower(daemon_id) = ANY(@legacy_daemon_ids::text[]))
+ORDER BY id
+FOR UPDATE;
+
 -- name: UpsertAgentRuntime :one
 -- (xmax = 0) AS inserted distinguishes a fresh insert (true) from an upsert
 -- that updated an existing row (false). Analytics reads this to fire
@@ -93,9 +110,12 @@ DO UPDATE SET
     status = EXCLUDED.status,
     device_info = EXCLUDED.device_info,
     metadata = EXCLUDED.metadata,
-    owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+-- User credentials can reconnect only to their existing owned runtime. A NULL
+-- stored owner is not provenance that a member may silently claim. Daemon
+-- credentials carry NULL owner and preserve it without inventing user authority.
+WHERE EXCLUDED.owner_id IS NULL OR agent_runtime.owner_id = EXCLUDED.owner_id
 RETURNING *, (xmax = 0) AS inserted;
 
 -- name: UpsertAgentRuntimeWithProfile :one
@@ -127,9 +147,12 @@ DO UPDATE SET
     status = EXCLUDED.status,
     device_info = EXCLUDED.device_info,
     metadata = EXCLUDED.metadata,
-    owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+-- User credentials can reconnect only to their existing owned runtime. A NULL
+-- stored owner is not provenance that a member may silently claim. Daemon
+-- credentials carry NULL owner and preserve it without inventing user authority.
+WHERE EXCLUDED.owner_id IS NULL OR agent_runtime.owner_id = EXCLUDED.owner_id
 RETURNING *, (xmax = 0) AS inserted;
 
 -- name: UpdateAgentRuntimeVisibility :one
@@ -429,6 +452,7 @@ SELECT count(*) FROM agent WHERE runtime_id = $1 AND archived_at IS NULL;
 -- row into the new UUID-keyed runtime.
 SELECT * FROM agent_runtime
 WHERE workspace_id = @workspace_id
+  AND profile_id IS NULL
   AND provider = @provider
   AND LOWER(daemon_id) = LOWER(@daemon_id);
 

@@ -33,6 +33,23 @@ Replace the placeholders with your actual binding. Use the existing `--profile` 
 
 The daemon-side read helper uses only these local bindings, permits list/read, runs the approved executable without a shell or PATH lookup, and bounds typed results. It is not connected to a polling loop yet. These settings do not start a process, activate automatic reads, or add UI controls. Tests use test-created executables, not your installed Beads CLI or agent accounts.
 
+## Milestone 4: registration ownership and atomicity
+
+Runtime registration preserves the existing owner. A different member or admin cannot adopt another owner's runtime or an ownerless runtime, including custom and failed profiles. Daemon-token reconnects must match the exact authenticated daemon and cannot request legacy identity merges. Same-owner reconnects, profile identity, custom names and source-free legacy merges remain supported.
+
+A registration request commits all its runtime changes together. Membership removal serializes with registration, so a request waiting behind a successful removal cannot create another runtime afterward. Notifications are emitted only after commit.
+
+A legacy runtime with a work-source binding blocks migration with HTTP 409. The entire registration rolls back, leaving its runtime, source and agents unchanged. Reconnect using the existing approved identity. Do not delete or reassign bindings to force migration without an explicit reviewed migration workflow.
+
+Run the actual router and PostgreSQL checks in your managed testing checkout:
+
+```bash
+devenv shell -- bash -c 'cd server && go test -race ./cmd/server -run "^TestDaemonRegistration.*ThroughRouter$" -count=3 -v'
+devenv shell -- bash -c 'cd server && go test -race ./internal/handler -run "^(TestDaemonRegister.*|TestDaemonRegistrationUpsertOwnerGuards|TestRuntimeProfileDeleteLockSerializesRegistration|TestWorkSourceRuntimeMergeRefusal)$" -count=1 -v'
+```
+
+These tests use test-created credentials and inert runtime providers, not installed agents. This milestone adds no migration or UI. Source-only credential bootstrap and automatic source-read delivery remain unimplemented.
+
 ## Get the published milestone
 
 Use a separate clean checkout for periodic testing so ongoing implementation files cannot leak into the test build:

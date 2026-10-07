@@ -329,6 +329,7 @@ func (q *Queries) FailTasksForOfflineRuntimes(ctx context.Context, arg FailTasks
 const findLegacyRuntimesByDaemonID = `-- name: FindLegacyRuntimesByDaemonID :many
 SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, agent_workflow_capabilities FROM agent_runtime
 WHERE workspace_id = $1
+  AND profile_id IS NULL
   AND provider = $2
   AND LOWER(daemon_id) = LOWER($3)
 `
@@ -941,6 +942,80 @@ func (q *Queries) LockAgentRuntime(ctx context.Context, id pgtype.UUID) (AgentRu
 		&i.AgentWorkflowCapabilities,
 	)
 	return i, err
+}
+
+const lockDaemonRegistration = `-- name: LockDaemonRegistration :exec
+SELECT pg_advisory_xact_lock(
+    hashtext('daemon-registration:' || ($1::uuid)::text),
+    hashtext(lower($2::text))
+)
+`
+
+type LockDaemonRegistrationParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    string      `json:"daemon_id"`
+}
+
+// Registration serializes before profile/runtime locks. Membership revocation
+// still uses LockSubscriberWrites first, followed by the workspace lock.
+func (q *Queries) LockDaemonRegistration(ctx context.Context, arg LockDaemonRegistrationParams) error {
+	_, err := q.db.Exec(ctx, lockDaemonRegistration, arg.WorkspaceID, arg.DaemonID)
+	return err
+}
+
+const lockDaemonRegistrationRuntimes = `-- name: LockDaemonRegistrationRuntimes :many
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, agent_workflow_capabilities FROM agent_runtime
+WHERE workspace_id = $1
+  AND (daemon_id = $2 OR lower(daemon_id) = ANY($3::text[]))
+ORDER BY id
+FOR UPDATE
+`
+
+type LockDaemonRegistrationRuntimesParams struct {
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	DaemonID        pgtype.Text `json:"daemon_id"`
+	LegacyDaemonIds []string    `json:"legacy_daemon_ids"`
+}
+
+// Lock the addressed machine and legacy candidates together, in UUID order,
+// before any upsert or merge can acquire a second runtime lock.
+func (q *Queries) LockDaemonRegistrationRuntimes(ctx context.Context, arg LockDaemonRegistrationRuntimesParams) ([]AgentRuntime, error) {
+	rows, err := q.db.Query(ctx, lockDaemonRegistrationRuntimes, arg.WorkspaceID, arg.DaemonID, arg.LegacyDaemonIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentRuntime{}
+	for rows.Next() {
+		var i AgentRuntime
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.DaemonID,
+			&i.Name,
+			&i.RuntimeMode,
+			&i.Provider,
+			&i.Status,
+			&i.DeviceInfo,
+			&i.Metadata,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.OwnerID,
+			&i.LegacyDaemonID,
+			&i.Visibility,
+			&i.ProfileID,
+			&i.CustomName,
+			&i.AgentWorkflowCapabilities,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const lockRuntimesForMerge = `-- name: LockRuntimesForMerge :many
@@ -1628,9 +1703,9 @@ DO UPDATE SET
     status = EXCLUDED.status,
     device_info = EXCLUDED.device_info,
     metadata = EXCLUDED.metadata,
-    owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+WHERE EXCLUDED.owner_id IS NULL OR agent_runtime.owner_id = EXCLUDED.owner_id
 RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, agent_workflow_capabilities, (xmax = 0) AS inserted
 `
 
@@ -1675,6 +1750,9 @@ type UpsertAgentRuntimeRow struct {
 // index from migration 121 (WHERE profile_id IS NULL); the predicate must be
 // spelled out so Postgres selects that partial index, not the custom-runtime
 // one on (workspace_id, daemon_id, profile_id).
+// User credentials can reconnect only to their existing owned runtime. A NULL
+// stored owner is not provenance that a member may silently claim. Daemon
+// credentials carry NULL owner and preserve it without inventing user authority.
 func (q *Queries) UpsertAgentRuntime(ctx context.Context, arg UpsertAgentRuntimeParams) (UpsertAgentRuntimeRow, error) {
 	row := q.db.QueryRow(ctx, upsertAgentRuntime,
 		arg.WorkspaceID,
@@ -1734,9 +1812,9 @@ DO UPDATE SET
     status = EXCLUDED.status,
     device_info = EXCLUDED.device_info,
     metadata = EXCLUDED.metadata,
-    owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+WHERE EXCLUDED.owner_id IS NULL OR agent_runtime.owner_id = EXCLUDED.owner_id
 RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, agent_workflow_capabilities, (xmax = 0) AS inserted
 `
 
@@ -1782,6 +1860,9 @@ type UpsertAgentRuntimeWithProfileRow struct {
 // profiles of the same protocol family. provider carries the base runtime
 // identity so ResolveBackend applies its descriptor; profile_id preserves
 // custom-profile provenance. (xmax = 0) AS inserted mirrors UpsertAgentRuntime.
+// User credentials can reconnect only to their existing owned runtime. A NULL
+// stored owner is not provenance that a member may silently claim. Daemon
+// credentials carry NULL owner and preserve it without inventing user authority.
 func (q *Queries) UpsertAgentRuntimeWithProfile(ctx context.Context, arg UpsertAgentRuntimeWithProfileParams) (UpsertAgentRuntimeWithProfileRow, error) {
 	row := q.db.QueryRow(ctx, upsertAgentRuntimeWithProfile,
 		arg.WorkspaceID,
