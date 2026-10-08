@@ -185,6 +185,10 @@ type AgentTaskQueue struct {
 	ControlState              []byte             `json:"control_state"`
 	ControlUpdatedAt          pgtype.Timestamptz `json:"control_updated_at"`
 	WorkingCopyID             pgtype.UUID        `json:"working_copy_id"`
+	GraphRunID                pgtype.UUID        `json:"graph_run_id"`
+	WorkSourceID              pgtype.UUID        `json:"work_source_id"`
+	WorkNativeID              pgtype.Text        `json:"work_native_id"`
+	ExecutionUncertain        bool               `json:"execution_uncertain"`
 }
 
 type AgentToLabel struct {

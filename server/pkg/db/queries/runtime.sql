@@ -317,6 +317,7 @@ WITH victims AS (
   FROM agent_task_queue task
   JOIN agent_runtime runtime ON runtime.id = task.runtime_id
   WHERE task.status IN ('dispatched', 'running', 'waiting_local_directory')
+    AND task.graph_run_id IS NULL
     AND runtime.status = 'offline'
     AND COALESCE(runtime.last_seen_at, runtime.updated_at) <
         now() - make_interval(secs => @reconnect_grace_secs::double precision)
@@ -331,6 +332,7 @@ SET status = 'failed', completed_at = now(), error = 'runtime went offline',
 FROM victims
 WHERE task.id = victims.id
   AND task.status IN ('dispatched', 'running', 'waiting_local_directory')
+  AND task.graph_run_id IS NULL
 RETURNING task.*;
 
 -- name: ListAgentRuntimesByOwner :many
@@ -378,6 +380,7 @@ SET status = 'cancelled', completed_at = now(),
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE (runtime_id = ANY(@runtime_ids::uuid[]) OR agent_id = ANY(@agent_ids::uuid[]))
   AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: CountUndrainedTasksByRuntimeOrAgent :one
@@ -404,7 +407,8 @@ WHERE (runtime_id = ANY(@runtime_ids::uuid[]) OR agent_id = ANY(@agent_ids::uuid
 -- every row on the runtime.
 UPDATE agent_task_queue
 SET runtime_id = NULL
-WHERE runtime_id = $1 AND completed_at IS NOT NULL;
+WHERE runtime_id = $1 AND completed_at IS NOT NULL
+  AND graph_run_id IS NULL;
 
 -- name: UnbindUserAgentsFromRuntime :many
 -- MUL-5559: the runtime-delete replacement for archive-then-hard-delete. Every
@@ -521,6 +525,7 @@ reassigned AS (
     UPDATE agent_task_queue
     SET runtime_id = @new_runtime_id
     WHERE runtime_id = @old_runtime_id
+      AND graph_run_id IS NULL
       AND (SELECT ok FROM fence)
     RETURNING id
 )

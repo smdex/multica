@@ -140,6 +140,8 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"603_agent_task_native_active_slot":                         "agent_task_native_active_slot",
+	"604_agent_task_graph_node_slot":                            "agent_task_graph_node_slot",
 	"598_workflow_run_id_index":                                 "workflow_run_id_idx",
 	"599_workflow_run_request_index":                            "workflow_run_request_idx",
 	"601_work_source_native_request_index":                      "work_source_native_request_idx",

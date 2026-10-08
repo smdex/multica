@@ -397,7 +397,7 @@ RETURNING *;
 -- by the fire_at sweeper no longer matches and is treated as settled.
 UPDATE agent_task_queue
 SET status = 'queued', fire_at = NULL
-WHERE id = $1 AND issue_id IS NOT NULL AND status = 'deferred'
+WHERE id = $1 AND issue_id IS NOT NULL AND status = 'deferred' AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: SetDeferredChannelIssueTaskRuntimeOverlay :execrows
@@ -411,6 +411,7 @@ WHERE id = @id
   AND status = 'deferred'
   AND context->>'channel_issue_media_pending' = 'true'
   AND trigger_comment_id IS NULL
+  AND graph_run_id IS NULL
   AND originator_user_id IS NOT DISTINCT FROM sqlc.narg(expected_originator_user_id)::uuid;
 
 -- name: CreateQuickCreateTask :one
@@ -456,6 +457,7 @@ RETURNING *;
 UPDATE agent_task_queue
 SET issue_id = $2
 WHERE id = $1 AND issue_id IS NULL
+  AND graph_run_id IS NULL
   AND lock_task_owner_rows(NULL, $2, NULL);
 
 -- name: CreateRetryTask :one
@@ -572,6 +574,7 @@ SELECT
     COALESCE(sqlc.narg('new_task_id')::uuid, gen_random_uuid())
 FROM agent_task_queue p
 WHERE p.id = $1
+  AND p.graph_run_id IS NULL
   AND lock_task_owner_rows(p.agent_id, p.issue_id, p.runtime_id)
 ON CONFLICT (issue_id, agent_id, (COALESCE(comment_thread_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE status IN ('queued', 'dispatched')
        OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
@@ -607,6 +610,7 @@ WHERE p.id = sqlc.arg(source_task_id)
   AND p.issue_id IS NULL
   AND p.chat_session_id IS NULL
   AND p.autopilot_run_id IS NULL
+  AND p.graph_run_id IS NULL
   AND lock_task_owner_rows(p.agent_id, p.issue_id, p.runtime_id)
 RETURNING *;
 
@@ -621,7 +625,8 @@ WHERE id = sqlc.arg(task_id)
   AND status IN ('queued', 'deferred')
   AND issue_id IS NULL
   AND chat_session_id IS NULL
-  AND autopilot_run_id IS NULL;
+  AND autopilot_run_id IS NULL
+  AND graph_run_id IS NULL;
 
 -- name: CancelAgentTasksByIssue :many
 -- Cancels every active task on the issue and returns the affected rows so the
@@ -633,6 +638,7 @@ UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE issue_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: CancelPendingTasksByIssueAndAgent :many
@@ -657,6 +663,7 @@ SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE issue_id = $1 AND agent_id = $2
   AND status IN ('queued', 'dispatched', 'deferred')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: CancelPendingTasksByIssueAndAgentInThread :many
@@ -667,6 +674,7 @@ SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE issue_id = $1 AND agent_id = $2
   AND status IN ('queued', 'dispatched', 'deferred')
+  AND graph_run_id IS NULL
   AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid)
 RETURNING *;
 
@@ -680,6 +688,7 @@ UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE agent_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: CancelAgentTasksByTriggerComment :many
@@ -693,6 +702,7 @@ SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('comment_change_cancelled_task_id', id::text)
 WHERE (trigger_comment_id = $1 OR $1 = ANY(coalesced_comment_ids))
   AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: CancelAgentTasksByChatSession :many
@@ -705,6 +715,7 @@ UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE chat_session_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: GetAgentTask :one
@@ -768,6 +779,7 @@ WHERE id = (
     WHERE atq.agent_id = @agent_id
       AND atq.runtime_id = @runtime_id
       AND atq.status = 'queued'
+      AND atq.graph_run_id IS NULL
       AND (atq.context->>'wakeup_id' IS NULL OR EXISTS (SELECT 1 FROM issue_wakeup w WHERE w.id=(atq.context->>'wakeup_id')::uuid AND w.disabled_at IS NULL AND w.revision=(atq.context->>'wakeup_revision')::bigint))
       AND EXISTS (
           SELECT 1
@@ -803,9 +815,11 @@ WHERE id = (
                 atq.issue_id IS NULL
                 AND atq.chat_session_id IS NULL
                 AND atq.autopilot_run_id IS NULL
+                AND atq.graph_run_id IS NULL
                 AND active.issue_id IS NULL
                 AND active.chat_session_id IS NULL
                 AND active.autopilot_run_id IS NULL
+                AND active.graph_run_id IS NULL
               )
             )
       )
@@ -828,6 +842,7 @@ WHERE id = @task_id
   AND status = 'dispatched'
   AND started_at IS NULL
   AND dispatched_at = @dispatched_at
+  AND graph_run_id IS NULL
   AND trigger_comment_id IS NOT DISTINCT FROM sqlc.narg(expected_trigger_comment_id)::uuid
   AND NOT EXISTS (
       SELECT 1
@@ -872,6 +887,7 @@ WHERE id = @task_id
   AND status = 'dispatched'
   AND started_at IS NULL
   AND dispatched_at = @dispatched_at
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: ReclaimStaleDispatchedTaskForRuntime :one
@@ -888,6 +904,7 @@ WHERE id = (
     WHERE atq.runtime_id = $1
       AND atq.status = 'dispatched'
       AND atq.started_at IS NULL
+      AND atq.graph_run_id IS NULL
       AND atq.dispatched_at < now() - make_interval(secs => @claim_recovery_secs::double precision)
       AND (atq.prepare_lease_expires_at IS NULL OR atq.prepare_lease_expires_at < now())
       AND EXISTS (
@@ -935,6 +952,7 @@ WHERE id IN (
     WHERE atq.runtime_id = ANY(@runtime_ids::uuid[])
       AND atq.status = 'dispatched'
       AND atq.started_at IS NULL
+      AND atq.graph_run_id IS NULL
       AND atq.dispatched_at < now() - make_interval(secs => @claim_recovery_secs::double precision)
       AND (atq.prepare_lease_expires_at IS NULL OR atq.prepare_lease_expires_at < now())
       AND EXISTS (
@@ -977,6 +995,7 @@ WHERE id = $1
   AND runtime_id = $2
   AND status IN ('dispatched', 'waiting_local_directory')
   AND started_at IS NULL
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: StartAgentTask :one
@@ -993,6 +1012,7 @@ SET status = 'running',
     wait_reason = NULL,
     prepare_lease_expires_at = NULL
 WHERE agent_task_queue.id = $1 AND agent_task_queue.status IN ('dispatched', 'waiting_local_directory')
+  AND agent_task_queue.graph_run_id IS NULL
 RETURNING *;
 
 -- name: LockAgentTaskStartClaim :one
@@ -1001,6 +1021,7 @@ RETURNING *;
 SELECT * FROM agent_task_queue
 WHERE id = $1 AND runtime_id = $2 AND dispatched_at = $3
   AND status IN ('dispatched', 'waiting_local_directory', 'running')
+  AND graph_run_id IS NULL
 FOR UPDATE;
 
 -- name: StartAgentTaskWithRun :one
@@ -1016,6 +1037,7 @@ SET status = 'running',
     control_state = NULL,
     control_updated_at = NULL
 WHERE id = @id AND status IN ('dispatched', 'waiting_local_directory')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: GetActiveChatControlTask :one
@@ -1040,6 +1062,7 @@ WHERE id = @id
   AND runtime_id = @runtime_id
   AND active_run_id = @active_run_id
   AND status = 'running'
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: MarkAgentTaskWaitingLocalDirectory :one
@@ -1057,6 +1080,7 @@ SET status = 'waiting_local_directory',
     wait_reason = $2,
     prepare_lease_expires_at = now() + make_interval(secs => @prepare_lease_secs::double precision)
 WHERE id = $1 AND status = 'dispatched'
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: CompleteAgentTask :one
@@ -1081,6 +1105,7 @@ SET status = 'completed', completed_at = now(), result = $2,
     retired_session_id = COALESCE(sqlc.narg('retired_session_id'), retired_session_id),
     prepare_lease_expires_at = NULL
 WHERE id = $1 AND status = 'running'
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: GetLastTaskSession :one
@@ -1337,6 +1362,7 @@ SET status = 'failed',
     retired_session_id = COALESCE(sqlc.narg('retired_session_id'), retired_session_id),
     prepare_lease_expires_at = NULL
 WHERE id = $1 AND status IN ('dispatched', 'running', 'waiting_local_directory')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: UpdateAgentTaskSession :exec
@@ -1360,7 +1386,8 @@ WHERE id = $1
   AND (
     status IN ('dispatched', 'running')
     OR (status = 'cancelled' AND session_id IS NULL)
-  );
+  )
+  AND graph_run_id IS NULL;
 
 -- name: RecoverOrphanedTasksForRuntime :many
 -- Called by the daemon at startup. Atomically fails any dispatched/running/
@@ -1377,6 +1404,7 @@ SET status = 'failed',
     wait_reason = NULL,
     prepare_lease_expires_at = NULL
 WHERE runtime_id = $1 AND status IN ('dispatched', 'running', 'waiting_local_directory')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: FailStaleTasks :many
@@ -1420,6 +1448,7 @@ WHERE (
     status = 'dispatched'
     AND dispatched_at < now() - make_interval(secs => @dispatch_timeout_secs::double precision)
     AND (prepare_lease_expires_at IS NULL OR prepare_lease_expires_at < now())
+    AND graph_run_id IS NULL
     AND (
       runtime_id IS NULL
       OR NOT EXISTS (
@@ -1444,6 +1473,7 @@ WHERE (
    OR (
     status = 'running'
     AND started_at < now() - make_interval(secs => @running_timeout_secs::double precision)
+    AND graph_run_id IS NULL
     AND (
       runtime_id IS NULL
       OR NOT EXISTS (
@@ -1521,6 +1551,7 @@ RETURNING *;
 WITH victims AS (
     SELECT id FROM agent_task_queue
     WHERE status = 'queued' AND context->>'wakeup_id' IS NULL
+      AND graph_run_id IS NULL
       AND created_at < now() - make_interval(secs => @reconnect_grace_secs::double precision)
       AND (
           runtime_id IS NULL
@@ -1552,6 +1583,7 @@ SET status = 'failed',
 FROM victims v
 WHERE t.id = v.id
   AND t.status = 'queued'
+  AND t.graph_run_id IS NULL
   AND t.created_at < now() - make_interval(secs => @reconnect_grace_secs::double precision)
   AND (
       t.runtime_id IS NULL
@@ -1583,6 +1615,7 @@ WITH victims AS (
     FROM agent_task_queue retry
     JOIN agent_task_queue parent ON parent.id = retry.parent_task_id
     WHERE retry.status = 'deferred'
+      AND retry.graph_run_id IS NULL
       AND retry.fire_at < now() - make_interval(secs => @reconnect_grace_secs::double precision)
       AND parent.failure_reason = 'runtime_offline'
       AND NOT EXISTS (
@@ -1606,6 +1639,7 @@ SET status = 'failed',
 FROM victims
 WHERE retry.id = victims.id
   AND retry.status = 'deferred'
+  AND retry.graph_run_id IS NULL
   AND retry.fire_at < now() - make_interval(secs => @reconnect_grace_secs::double precision)
   AND EXISTS (
       SELECT 1 FROM agent_task_queue parent
@@ -1628,6 +1662,7 @@ UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: CancelAgentTaskByUser :one
@@ -1691,6 +1726,7 @@ SET status = 'cancelled',
     END
 WHERE task.id = $1
   AND task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND task.graph_run_id IS NULL
 RETURNING task.*;
 
 -- name: SetAgentTaskBranchName :exec
@@ -1751,6 +1787,7 @@ SET status = 'cancelled',
     cancelled_by_id = NULL,
     cancelled_by_name = NULL
 WHERE id = sqlc.arg('id') AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: CancelQueuedAgentTask :one
@@ -1764,6 +1801,7 @@ SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
 WHERE id = sqlc.arg('id')
   AND chat_session_id = sqlc.arg('chat_session_id')
   AND status = 'queued'
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: CancelQueuedAgentTasksForSession :many
@@ -1793,6 +1831,7 @@ SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE queued.chat_session_id = $1
   AND queued.status = 'queued'
+  AND queued.graph_run_id IS NULL
   AND queued.id IS DISTINCT FROM (SELECT id FROM head)
 RETURNING queued.*;
 
@@ -1801,7 +1840,7 @@ RETURNING queued.*;
 -- empty-transcript judgment must wait for the daemon's flush ack (#5219).
 UPDATE agent_task_queue
 SET chat_finalize_deferred_at = now()
-WHERE id = $1
+WHERE id = $1 AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: ClaimChatFinalizeDeferred :one
@@ -1809,7 +1848,7 @@ RETURNING *;
 -- cannot both finalize the same task (double-"Stopped." guard).
 UPDATE agent_task_queue
 SET chat_finalize_deferred_at = NULL
-WHERE id = $1 AND chat_finalize_deferred_at IS NOT NULL
+WHERE id = $1 AND chat_finalize_deferred_at IS NOT NULL AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: ListChatFinalizeDeferredExpired :many
@@ -1828,7 +1867,9 @@ LIMIT @max_per_tick::int;
 -- idle by RefreshAgentStatusFromTasks but still cannot claim additional work;
 -- removing it here alone could exceed max_concurrent_tasks when it resumes.
 SELECT count(*) FROM agent_task_queue
-WHERE agent_id = $1 AND status IN ('dispatched', 'running', 'waiting_local_directory');
+WHERE agent_id = $1
+  AND (status IN ('dispatched', 'running', 'waiting_local_directory')
+       OR (graph_run_id IS NOT NULL AND execution_uncertain));
 
 -- name: GetAgentForClaimUpdate :one
 SELECT * FROM agent
@@ -1996,6 +2037,7 @@ SET coalesced_comment_ids = (
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+      AND t.graph_run_id IS NULL
       AND t.agent_id = @agent_id
       AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@new_trigger_comment_id::uuid)
       AND (
@@ -2052,6 +2094,7 @@ SET coalesced_comment_ids = (
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+      AND t.graph_run_id IS NULL
       AND t.agent_id = @agent_id
       AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id::uuid)
       AND t.status IN ('dispatched', 'running', 'waiting_local_directory')
@@ -2063,6 +2106,7 @@ WHERE id = (
     LIMIT 1
 )
 AND status IN ('dispatched', 'running', 'waiting_local_directory')
+AND graph_run_id IS NULL
 RETURNING id, coalesced_comment_ids;
 
 -- name: MergeDelegatedFailureCommentIntoPendingTask :one
@@ -2083,6 +2127,7 @@ SET coalesced_comment_ids = (
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+      AND t.graph_run_id IS NULL
       AND t.agent_id = @agent_id
       AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id::uuid)
       AND (
@@ -2142,6 +2187,7 @@ WHERE acknowledged.id = (
     SELECT attempt.id
     FROM agent_task_queue attempt
     WHERE attempt.trigger_evidence_kind = 'delegated_failure'
+      AND attempt.graph_run_id IS NULL
       AND attempt.trigger_evidence_ref_id = @failed_task_id
     ORDER BY attempt.created_at DESC, attempt.id DESC
     LIMIT 1
@@ -2345,6 +2391,7 @@ ORDER BY priority DESC, created_at ASC;
 SELECT atq.* FROM agent_task_queue atq
 WHERE atq.runtime_id = $1
   AND atq.status = 'queued'
+  AND atq.graph_run_id IS NULL
       AND (atq.context->>'wakeup_id' IS NULL OR EXISTS (SELECT 1 FROM issue_wakeup w WHERE w.id=(atq.context->>'wakeup_id')::uuid AND w.disabled_at IS NULL AND w.revision=(atq.context->>'wakeup_revision')::bigint))
   AND EXISTS (
       -- Keep this authorization fence in sync with ClaimAgentTask.
@@ -2388,6 +2435,7 @@ SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE r.runtime_id = ANY(@runtime_ids::uuid[])
   AND r.status = 'deferred'
+  AND r.graph_run_id IS NULL
   AND r.issue_id IS NOT NULL
   AND r.retry_of_task_id IS NOT NULL
   AND COALESCE(r.context->>'channel_issue_media_pending', '') <> 'true'
@@ -2427,6 +2475,7 @@ WITH due AS (
     FROM agent_task_queue t
     WHERE t.runtime_id = @runtime_id
       AND t.status = 'deferred'
+      AND t.graph_run_id IS NULL
       AND t.fire_at <= now()
       AND EXISTS (
         SELECT 1 FROM agent_runtime r
@@ -2450,6 +2499,7 @@ WITH due AS (
 UPDATE agent_task_queue
 SET status = 'queued'
 WHERE id IN (SELECT id FROM due WHERE issue_id IS NULL OR rn = 1)
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: ListQueuedClaimCandidatesByRuntimes :many
@@ -2466,6 +2516,7 @@ RETURNING *;
 SELECT atq.* FROM agent_task_queue atq
 WHERE atq.runtime_id = ANY(@runtime_ids::uuid[])
   AND atq.status = 'queued'
+  AND atq.graph_run_id IS NULL
       AND (atq.context->>'wakeup_id' IS NULL OR EXISTS (SELECT 1 FROM issue_wakeup w WHERE w.id=(atq.context->>'wakeup_id')::uuid AND w.disabled_at IS NULL AND w.revision=(atq.context->>'wakeup_revision')::bigint))
   AND EXISTS (
       -- Keep this authorization fence in sync with ClaimAgentTask.
@@ -2494,6 +2545,7 @@ SELECT MIN(fire_at)::timestamptz
 FROM agent_task_queue t
 WHERE t.runtime_id = ANY(@runtime_ids::uuid[])
   AND t.status = 'deferred'
+  AND t.graph_run_id IS NULL
   AND EXISTS (
     SELECT 1 FROM agent_runtime r
     WHERE r.id = t.runtime_id
@@ -2530,6 +2582,7 @@ WITH due AS (
     FROM agent_task_queue t
     WHERE t.runtime_id = ANY(@runtime_ids::uuid[])
       AND t.status = 'deferred'
+      AND t.graph_run_id IS NULL
       AND t.fire_at <= now()
       AND EXISTS (
         SELECT 1 FROM agent_runtime r
@@ -2553,6 +2606,7 @@ WITH due AS (
 UPDATE agent_task_queue
 SET status = 'queued'
 WHERE id IN (SELECT id FROM due WHERE issue_id IS NULL OR rn = 1)
+  AND graph_run_id IS NULL
 RETURNING *;
 
 -- name: ListActiveTasksByIssue :many

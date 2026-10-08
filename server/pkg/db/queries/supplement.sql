@@ -7,6 +7,7 @@ WITH candidate AS MATERIALIZED (
     FROM agent_task_queue t
     JOIN agent_runtime r ON r.id = t.runtime_id
     WHERE t.id = @task_id
+      AND t.graph_run_id IS NULL
       AND t.status IN ('dispatched', 'waiting_local_directory')
     FOR UPDATE OF t
 ), capability AS (
