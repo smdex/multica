@@ -205,6 +205,16 @@ Graph controls are still undelivered. The future browser checklist will cover so
 
 The [operational enrollment ledger](native-enrollment-operational.md) records the exact verified CLI/domain/daemon and shared Sources metadata commits, actual public acceptance checks and operator/visual instructions. The native domain remains empty and disabled after enrollment: its manifest hash identifies the ownership marker, not Beads content or graph readiness. Explicit CLI and production Daemon.Run enrollment, lock ownership, exact retries, cancellation, authority fences and the real TypeScript client bridge passed immutable archive checks. No browser E2E was run. Native initialization, graph Start/admission, typed handoffs/mail, Web session control/restart and preferred jj execution remain unfinished.
 
+## Milestone 12: qualified dedicated source initialization
+
+The [native source initialization runbook](native-source-initialization.md) supersedes milestone 11's statement that initialization is unfinished. The optional approved executable initializes a fresh dedicated domain while the original ownership lock is held, before profile-index publication. Verified replay, refused-launch, partial-init and authority paths are documented there. This is Linux-qualified local initialization, not source write CAS, external quiescence or graph admission.
+
+## Milestone 13: native admission safety foundations
+
+Published queue code `d26ac691` and launch/lifetime code `7126ed35`, followed by acceptance documentation `e8829132`, add [native graph admission safety foundations](native-graph-admission-foundations.md). The exact code passed real PostgreSQL queue and public-path compatibility checks, durable local journal and borrowed-domain race checks, and opted-in actual fake-Claude Session namespace qualification. Independent bounded review found no concrete blocker. Migrations 602-604 were reviewed and selectively applied for these checks.
+
+This milestone does not activate graph Start or advertise graph execution capability. There is no new graph page or control to visually test. Follow the linked requirement-to-check mapping and operator commands for nonvisual checks, and retain the existing Sources/enrollment and workspace/Issue/chat visual checklist above. Graph scheduling, joins and typed handoffs/mail, same-session product controls, durable restart reconciliation and preferred jj runtime execution remain unfinished.
+
 ## Publication boundary
 
 Verified milestones are published with jj to `origin` (`smdex/multica`) on `main`, with a dry-run and fast-forward ancestry check. Unfinished worker files and unrelated local edits stay local. Private agent transcripts are excluded from the published milestone ancestry. The original local history and working copy are preserved.
