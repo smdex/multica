@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -653,17 +654,44 @@ type heldNativeSource struct {
 	profile string
 }
 
+// borrowNativeSource borrows the exact root already held by enrollment, never
+// reopening a path or acquiring a second owner lock. Execution owners must
+// release only after recording stop evidence or durable execution uncertainty.
+func (d *Daemon) borrowNativeSource(ctx context.Context, sourceID, manifestHash string) (*execenv.NativeSourceDomain, func(), error) {
+	d.mu.Lock()
+	h := d.nativeSources[sourceID]
+	if ctx.Err() != nil || d.nativeSourcesClosing || h == nil {
+		d.mu.Unlock()
+		return nil, nil, errors.New("native source is not available for execution")
+	}
+	d.nativeSourceUsers.Add(1)
+	d.mu.Unlock()
+	var once sync.Once
+	release := func() { once.Do(d.nativeSourceUsers.Done) }
+	got, err := h.domain.ManifestHash()
+	if err != nil || got != manifestHash {
+		release()
+		return nil, nil, errors.New("native source ownership marker does not match")
+	}
+	return h.domain, release, nil
+}
+
 // nativeSourceEnrollmentLoop reconciles staged approvals into finalized
 // enrollments. It enumerates ONLY this daemon's profile indices whose recorded
 // backend URL and daemon ID match the running configuration, and only sources
 // whose workspace/runtime pairing is tracked by this daemon. Each held domain
-// keeps its owner lock until the loop's context is cancelled, even if its
-// index entry disappears meanwhile.
+// keeps its owner lock through cancellation until all execution borrowers have
+// released it, even if its index entry disappears meanwhile.
 // ponytail: serial finalize retries can delay other sources by one capability
 // lifetime (120s). Use a bounded per-source worker pool if enrollment volume grows.
 func (d *Daemon) nativeSourceEnrollmentLoop(ctx context.Context) {
 	held := make(map[string]*heldNativeSource) // sourceID -> held
 	defer func() {
+		d.mu.Lock()
+		d.nativeSourcesClosing = true
+		d.nativeSources = nil
+		d.mu.Unlock()
+		d.nativeSourceUsers.Wait()
 		for _, h := range held {
 			h.domain.Close()
 		}
@@ -802,14 +830,21 @@ func (d *Daemon) nativeSourceAdopt(cfgBackend, profile, sourceID string, held ma
 		// any invalid marker fails closed. Neither is retried destructively.
 		return
 	}
-	held[sourceID] = &heldNativeSource{domain: domain, entry: *entry, profile: profile}
+	h := &heldNativeSource{domain: domain, entry: *entry, profile: profile}
+	held[sourceID] = h
+	d.mu.Lock()
+	if d.nativeSources == nil {
+		d.nativeSources = make(map[string]*heldNativeSource)
+	}
+	d.nativeSources[sourceID] = h
+	d.mu.Unlock()
 }
 
 // nativeSourceDrainInbox consumes approval packets for one held domain. Each
 // unique inbox file is removed only on an exact acknowledged finalize; expired
 // or definitely rejected (4xx) packets are removed with a fixed warning that
 // names only the source ID. The held domain is NEVER released here: locks
-// stay held until the loop's context is cancelled.
+// stay held through shutdown until execution borrowers release them.
 func (d *Daemon) nativeSourceDrainInbox(ctx context.Context, cfgBackend string, h *heldNativeSource) {
 	inbox, err := openProfileEnrollmentDir(h.profile, nativeSourceInboxDir)
 	if err != nil {

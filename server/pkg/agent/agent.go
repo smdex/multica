@@ -8,11 +8,21 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 )
+
+// ErrNativeGraphNeverLaunched wraps a synchronous launch failure of an
+// opted-in native graph execution so callers can prove the provider
+// executable was never executed. It is returned only for failures at the
+// launch boundary itself (BeforeLaunch refusal, missing executable,
+// namespace setup failure, or cmd.Start failing before the executable ran);
+// later Execute-time transport or protocol errors must NOT be classified
+// with it.
+var ErrNativeGraphNeverLaunched = errors.New("agent: native graph execution never launched")
 
 // Backend is the unified interface for executing prompts via coding agents.
 type Backend interface {
@@ -139,6 +149,21 @@ type ExecOptions struct {
 	// ignore this field, mirroring ThinkingLevel's renderer-side fall-through
 	// pattern. See issue #3260.
 	OpenclawMode string
+	// NativeGraphProcess opts this execution into launching the provider CLI
+	// as a Linux user+PID namespace init (CLONE_NEWUSER|CLONE_NEWPID with
+	// identity-preserving UID/GID maps), so a detached setsid descendant
+	// cannot outlive the namespace init. Only backends that have qualified
+	// this seam (currently claude) honour it: other backends silently ignore
+	// the field and never set NativeProcessStopped. The daemon-side provider
+	// gate is NOT delivered by this seam; the caller MUST select the
+	// qualified claude backend itself. When set, BeforeLaunch is REQUIRED.
+	NativeGraphProcess bool
+	// BeforeLaunch is the durable reservation callback for a native graph
+	// execution: it must finish (fsync included) BEFORE any launch attempt,
+	// so a returned error guarantees the provider executable was never
+	// executed. Success means the launch MAY be attempted, not that a
+	// process started. Required exactly when NativeGraphProcess is set.
+	BeforeLaunch func() error
 	// ClaudeSettingsPath is a daemon-owned, task-local settings file passed
 	// through Claude Code's --settings flag. It currently carries restrictive
 	// runtime-skill overrides only; other providers ignore it.
@@ -322,6 +347,14 @@ type Result struct {
 	// requested session from future lookups. Backends must not set this together
 	// with ResumeRejected; the latter means the session is permanently unusable.
 	ResumeRejectedTransient bool
+	// NativeProcessStopped is POSITIVE evidence that the native process
+	// namespace backing this execution is stopped: the namespace init was
+	// reaped by an actual cmd.Wait and its ProcessState was observed. It is
+	// set only by backends that ran the execution with NativeGraphProcess,
+	// and only after that Wait returned. A semantic terminal result, stdout
+	// EOF, heartbeat loss, or a group-wide ESRCH is NOT stop evidence.
+	// false means "could not prove stopped", never "still running".
+	NativeProcessStopped bool
 	// codexInitializeRetrySafe is provider-internal evidence that an
 	// initialize timeout happened before semantic activity and after the
 	// process tree was reaped. It is intentionally not part of the public

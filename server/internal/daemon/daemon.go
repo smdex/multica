@@ -642,6 +642,13 @@ type Daemon struct {
 	pauseClaims    bool // when true, the batch poller skips claiming
 	claimsInFlight int  // pollers that have decided to claim but haven't yet handed the task off to handleTask
 
+	// nativeSources is published by the enrollment loop. Closing fences new
+	// borrowers before nativeSourceUsers.Wait, keeping domain locks held until
+	// all execution owners release their borrowed pinned roots.
+	nativeSources        map[string]*heldNativeSource
+	nativeSourcesClosing bool
+	nativeSourceUsers    sync.WaitGroup
+
 	activeEnvRootsMu   sync.Mutex
 	activeEnvRootsCond *sync.Cond      // signalled when an in-flight env-root GC mutation finishes
 	activeEnvRoots     map[string]int  // env root path -> reference count (handles reuse paths marked twice)

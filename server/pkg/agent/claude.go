@@ -47,11 +47,27 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	if err := validateInteractionOptions(opts); err != nil {
 		return nil, err
 	}
+	// Native graph execution is an explicit, qualified contract: it needs a
+	// durable reservation callback and a platform that can configure user+PID
+	// namespaces. Refusals here happen before any launch attempt, with the
+	// provider executable never executed, classified as never-launched.
+	// Only the claude backend is qualified for this option; other backends
+	// ignore it, emit no stop evidence, and the daemon-side provider gate is
+	// not delivered by this seam. The caller MUST select the qualified
+	// claude backend itself.
+	if opts.NativeGraphProcess && opts.BeforeLaunch == nil {
+		return nil, fmt.Errorf("%w: BeforeLaunch is required for native graph execution", ErrNativeGraphNeverLaunched)
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "claude"
 	}
 	if _, err := exec.LookPath(execPath); err != nil {
+		if opts.NativeGraphProcess {
+			// A launch that can never happen is never-launched evidence for the
+			// opted-in path; legacy callers keep the exact original error.
+			return nil, nativeGraphProcessStartError(fmt.Errorf("claude executable not found at %q: %w", execPath, err))
+		}
 		return nil, fmt.Errorf("claude executable not found at %q: %w", execPath, err)
 	}
 
@@ -147,10 +163,36 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	stderrBuf := newStderrTail(newLogWriter(b.cfg.Logger, "[claude:stderr] "), agentStderrTailBytes)
 	cmd.Stderr = stderrBuf
 
-	if err := startOwnedProcessTree(cmd, b.cfg.Logger); err != nil {
+	// Launch boundary for opted-in native graph executions: the durable
+	// reservation callback must finish (fsync included) BEFORE any launch
+	// attempt, so a returned error guarantees the provider executable was
+	// never executed, not that no OS process ever existed (the Go runtime's
+	// own failed fork/exec child does not count as a launch). A successful
+	// callback means the launch MAY be attempted, nothing more.
+	if opts.NativeGraphProcess {
+		if err := configureNativeGraphProcess(cmd); err != nil {
+			closeStdin()
+			cancel()
+			return nil, nativeGraphProcessStartError(err)
+		}
+		if err := opts.BeforeLaunch(); err != nil {
+			closeStdin()
+			cancel()
+			return nil, fmt.Errorf("%w: BeforeLaunch: %w", ErrNativeGraphNeverLaunched, err)
+		}
+	}
+
+	startErr := startOwnedProcessTree(cmd, b.cfg.Logger)
+	if startErr != nil {
 		closeStdin()
 		cancel()
-		return nil, fmt.Errorf("start claude: %w", err)
+		// Synchronous Start failure: the provider executable was never
+		// executed. Classified as never-launched only for the opted-in path,
+		// never for arbitrary later Execute/transport errors.
+		if opts.NativeGraphProcess {
+			return nil, nativeGraphProcessStartError(fmt.Errorf("start claude: %w", startErr))
+		}
+		return nil, fmt.Errorf("start claude: %w", startErr)
 	}
 
 	b.cfg.Logger.Info("claude started", "pid", cmd.Process.Pid, "cwd", opts.Cwd, "model", opts.Model)
@@ -388,6 +430,15 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		// Wait for process exit, then release the cancellation handler.
 		exitErr := cmd.Wait()
 		close(procDone)
+		// Positive native stop evidence, and only here: cmd.Wait has returned
+		// and ProcessState proves the namespace init was actually reaped by
+		// this parent. Semantic terminal results, stdout EOF, and group ESRCH
+		// are not substitutes and never set this flag.
+		nativeStopped := opts.NativeGraphProcess && cmd.ProcessState != nil
+		if nativeStopped {
+			b.cfg.Logger.Info("claude native process namespace stopped",
+				"pid", cmd.Process.Pid, "success", cmd.ProcessState.Success())
+		}
 		// The leader is reaped; drop ownership. On Windows that closes the Job
 		// Object, which kills anything still inside it — precisely what should
 		// happen to a descendant that outlived the CLI (GH #7522).
@@ -490,13 +541,14 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		}
 
 		resCh <- Result{
-			Status:         finalStatus,
-			Output:         finalOutput,
-			Error:          finalError,
-			DurationMs:     duration.Milliseconds(),
-			SessionID:      reportedSessionID,
-			Usage:          usage,
-			ResumeRejected: resumeRejected,
+			Status:               finalStatus,
+			Output:               finalOutput,
+			Error:                finalError,
+			DurationMs:           duration.Milliseconds(),
+			SessionID:            reportedSessionID,
+			Usage:                usage,
+			ResumeRejected:       resumeRejected,
+			NativeProcessStopped: nativeStopped,
 		}
 	}()
 
