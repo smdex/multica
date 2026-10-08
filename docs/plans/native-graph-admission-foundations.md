@@ -59,6 +59,16 @@ This is process-stop evidence for processes inside the namespace. It is not file
 
 The queue suite uses real PostgreSQL and real generated query interfaces. It does not constitute public graph API acceptance because no such execution API is activated. Process tests use the actual Claude Session implementation with a test-created fake executable, never an installed or authenticated agent CLI. Namespace tests are explicitly gated and fail rather than skip when opted in but unsupported. The SQL matrix covers representative workflow paths, not an individual dynamic test for every static guard.
 
+## Verified checkpoint
+
+On October 8, 2026, exact source commit `7126ed355e3d3d7fb92c141fff86d3df1f1a6095`, including queue parent `d26ac691`, passed the checks above with no skipped integration or opted-in namespace tests. SQL regeneration reproduced the committed generated files. Queue, journal, held-domain lifetime and namespace checks ran with the race detector and three repetitions.
+
+The schema-aligned unguarded baseline demonstrated actual graph-row mutations in 17 of 18 representative matrix cases, incorrect deferred polling and missing uncertain-capacity accounting. The guarded checks passed with matched legacy positive controls. The no-successor supersede case was preservation-only, not a demonstrated baseline mutation.
+
+Eight existing public TaskService claim tests and production-router source credential, actual daemon read dispatch, frozen draft and daemon registration regressions also passed. These include authorization denials, revocation, expiry after lock waits, lost report replies, detail/failure results and source-bound registration rollback. Existing Claude tests, vet and the full Go build passed. Darwin daemon/agent and Windows agent builds passed compilation only, not runtime qualification. Independent bounded read-only review found no concrete safety blocker.
+
+No complete repository test suite, frontend checks or browser tests were run for this Go-only increment. No installed or authenticated agent CLI was executed. The qualified process tests used a test-created fake Claude executable. These results validate this safety increment, not activated graph scheduling, teardown reconciliation or the complete native swarm.
+
 ## Operator checks
 
 Use the checkout's existing managed environment and database configuration. Do not start a second database manager or apply all pending migrations indiscriminately.
