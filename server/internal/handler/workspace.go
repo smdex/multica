@@ -19,6 +19,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -816,6 +817,11 @@ func failWorkspaceDelete(w http.ResponseWriter, r *http.Request, workspaceID, st
 		writeError(w, http.StatusServiceUnavailable, "workspace deletion is temporarily blocked by another operation, please try again")
 		return
 	}
+	if errors.Is(err, service.ErrNativeGraphReservationConflict) {
+		slog.Warn("workspace delete blocked by native graph reservations", attrs...)
+		writeError(w, http.StatusConflict, "Workspace deletion is unavailable while native graph reservations exist. Graph-aware cleanup is not available yet.")
+		return
+	}
 	slog.Warn("workspace delete step failed", attrs...)
 	writeError(w, http.StatusInternalServerError, "failed to delete workspace")
 }
@@ -1134,6 +1140,22 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := qtx.LockWorkspaceForDelete(r.Context(), requester.WorkspaceID); err != nil {
 		failWorkspaceDelete(w, r, workspaceID, "lock workspace", err)
+		return
+	}
+	// Fail-closed graph-reservation fence: after the existing owner permission
+	// check and the workspace row lock, but BEFORE any destructive write or
+	// task sweep, reject while ANY graph reservation is reachable through the
+	// sweep's ownership paths (source, agent, runtime, or a workflow_run the
+	// sweep deletes). Conservative retention ceiling: terminal-certain
+	// reservations also block until graph-aware cleanup exists. A rejection
+	// rolls back the whole tx, leaving every row intact.
+	reserved, err := qtx.ExistsGraphReservationForWorkspace(r.Context(), requester.WorkspaceID)
+	if err != nil {
+		failWorkspaceDelete(w, r, workspaceID, "check graph reservations", err)
+		return
+	}
+	if reserved {
+		failWorkspaceDelete(w, r, workspaceID, "check graph reservations", service.ErrNativeGraphReservationConflict)
 		return
 	}
 	// Take a best-effort snapshot for post-commit daemon invalidation. Runtime

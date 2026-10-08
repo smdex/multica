@@ -17,6 +17,12 @@ var (
 	ErrWorkSourceInvalidInput  = errors.New("invalid work source request")
 	ErrWorkSourceNotFound      = errors.New("work source not found")
 	ErrWorkSourceOwnerConflict = errors.New("physical source already registered")
+	// ErrNativeGraphReservationConflict fails the source cascade closed while
+	// ANY graph reservation (agent_task_queue.graph_run_id) exists: deleting
+	// the source would orphan the reservation and its workflow_run evidence.
+	// Conservative retention ceiling: terminal-certain reservations also
+	// block until graph-aware cleanup exists.
+	ErrNativeGraphReservationConflict = errors.New("native graph reservations exist")
 )
 
 // WorkSourceService owns work_source and issue_work_link rows. TxStarter is
@@ -247,6 +253,12 @@ func (s *WorkSourceService) ListWorkSources(ctx context.Context, workspaceID pgt
 // concurrent link insert either commits first (and is swept) or waits and
 // then fails the source lock; dependent cleanup is application code per the
 // no-FK rule.
+//
+// Fail-closed while ANY graph reservation exists: the check runs inside the
+// same transaction, under the workspace+source locks, before any cleanup,
+// so a rejection preserves source, workflow_run, commands, links and queue
+// rows whole. Conservative retention ceiling: terminal-certain reservations
+// also block until graph-aware cleanup exists.
 func (s *WorkSourceService) DeleteWorkSourceCascade(ctx context.Context, workspaceID, sourceID pgtype.UUID) error {
 	return s.runInTx(ctx, func(q *db.Queries) error {
 		if _, err := q.LockWorkspaceForChatSessionCreate(ctx, workspaceID); errors.Is(err, pgx.ErrNoRows) {
@@ -260,6 +272,15 @@ func (s *WorkSourceService) DeleteWorkSourceCascade(ctx context.Context, workspa
 			return ErrWorkSourceNotFound
 		} else if err != nil {
 			return fmt.Errorf("lock source: %w", err)
+		}
+		reserved, err := q.ExistsGraphReservationForSource(ctx, db.ExistsGraphReservationForSourceParams{
+			ID: sourceID, WorkspaceID: workspaceID,
+		})
+		if err != nil {
+			return fmt.Errorf("check graph reservations: %w", err)
+		}
+		if reserved {
+			return ErrNativeGraphReservationConflict
 		}
 		if err := q.DeleteWorkflowRunsForSource(ctx, db.DeleteWorkflowRunsForSourceParams{SourceID: sourceID, WorkspaceID: workspaceID}); err != nil {
 			return err

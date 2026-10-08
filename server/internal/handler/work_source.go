@@ -113,6 +113,8 @@ func handleWorkSourceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid work source request")
 	case errors.Is(err, service.ErrNativeEnrollmentConflict):
 		writeError(w, http.StatusConflict, "native source awaits enrollment approval")
+	case errors.Is(err, service.ErrNativeGraphReservationConflict):
+		writeError(w, http.StatusConflict, "Source deletion is unavailable while native graph reservations exist. Graph-aware cleanup is not available yet.")
 	case isUniqueViolation(err):
 		writeError(w, http.StatusConflict, "physical source already registered")
 	default:
