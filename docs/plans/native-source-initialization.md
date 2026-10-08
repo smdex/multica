@@ -29,7 +29,9 @@ An exact retry with the same request UUID, body and executable uses the matching
 
 ## Nonvisual acceptance mapping
 
-On October 8, 2026 at 00:03 UTC, task `762058mig2` passed the live candidate's race primitive matrix and all actual CLI/production-router/PostgreSQL initialization tests. The selected Beads 1.3.1 executable also completed fresh initialization and exact receipt-preserving replay through the built CLI. This is live-candidate evidence, not yet immutable published-candidate acceptance.
+Task `762058mig2` passed the live candidate's race primitive matrix and all actual CLI/production-router/PostgreSQL initialization tests. Broader live task `849115arnp` passed full execenv/CLI packages, native read/enrollment race suites, vet/build and three public-workflow iterations.
+
+Exact code commit `4dc370d9927c868abd0a25e85a12224c3b26fccf` then passed immutable archive acceptance in task `045575zy15`: full execenv/CLI race packages, daemon native/read regressions, vet and build, actual archive-built CLI plus production Daemon.Run/enrollment/initializer routes for three iterations, selected Beads 1.3.1 fresh initialization and receipt-preserving replay, scoped read credentials/receipt compatibility, help exposure, and Darwin compilation of the unsupported-platform wiring. The explicit acceptance runs had no skips. Independent source review found no blocking defect. Frontend/mobile code tests, browser/visual E2E and complete native swarm execution were not run for this backend/CLI-only slice.
 
 | Requirement | Runnable check |
 | --- | --- |
