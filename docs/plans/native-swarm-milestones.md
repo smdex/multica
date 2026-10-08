@@ -215,6 +215,12 @@ Published queue code `d26ac691` and launch/lifetime code `7126ed35`, followed by
 
 This milestone does not activate graph Start or advertise graph execution capability. There is no new graph page or control to visually test. Follow the linked requirement-to-check mapping and operator commands for nonvisual checks, and retain the existing Sources/enrollment and workspace/Issue/chat visual checklist above. Graph scheduling, joins and typed handoffs/mail, same-session product controls, durable restart reconciliation and preferred jj runtime execution remain unfinished.
 
+## Milestone 14: graph reservation deletion safety
+
+Source code `9d370a02` adds [conservative graph reservation deletion safety](native-graph-deletion-safety.md). Source and workspace deletion now return 409 before destructive writes while any reachable graph reservation exists, including terminal-certain history. Exact committed code passed real production-router/PostgreSQL deletion, independent ownership, lock-wait, graph-free cleanup and existing draft/receipt/owner controls. Migration 605 supplies a concurrent all-graph partial covering index and was selectively applied and observed valid.
+
+Graph-aware cleanup is not available yet. Do not manually discard reservation evidence or test destructive deletion on a valued workspace. No new visual control, graph Start, scheduling, handoff or restart behavior is delivered by this increment. Use the linked nonvisual commands and retain the existing user-owned visual checklist.
+
 ## Publication boundary
 
 Verified milestones are published with jj to `origin` (`smdex/multica`) on `main`, with a dry-run and fast-forward ancestry check. Unfinished worker files and unrelated local edits stay local. Private agent transcripts are excluded from the published milestone ancestry. The original local history and working copy are preserved.
